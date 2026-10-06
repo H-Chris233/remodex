@@ -27,13 +27,14 @@ function invokeTask(action, { env = process.env, execImpl = execFileSync } = {})
 function resolveCodexBinary(env = process.env, execImpl = execFileSync) {
   let candidate = env.REMODEX_CODEX_BIN;
   if (!candidate) {
-    for (const name of ["codex.exe", "codex.cmd"]) {
-      try {
-        candidate = execImpl("where.exe", [name], { env, encoding: "utf8", windowsHide: true })
-          .trim().split(/\r?\n/)[0];
-        if (candidate) break;
-      } catch { /* Try the npm shim when no native binary is on PATH. */ }
-    }
+    try {
+      // Respect the user's PATH order instead of silently choosing the desktop
+      // app's bundled CLI over a different, already configured npm installation.
+      // where.exe uses the OEM code page when redirected, corrupting non-ASCII paths.
+      candidate = execImpl("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+        "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); (Get-Command codex -CommandType Application -All -ErrorAction Stop | Where-Object { $_.Source -match '\\.(exe|cmd)$' } | Select-Object -First 1).Source",
+      ], { env, encoding: "utf8", windowsHide: true, timeout: 10_000 }).trim();
+    } catch { /* Report an actionable missing-runtime error below. */ }
   }
   if (!candidate || !path.isAbsolute(candidate) || !/\.(exe|cmd)$/i.test(candidate)
       || /["\r\n%]/.test(candidate) || !fs.existsSync(candidate)) {

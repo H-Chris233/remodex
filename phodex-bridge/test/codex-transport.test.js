@@ -29,6 +29,22 @@ test("Windows launch keeps no-daemon and quotes an absolute npm shim", () => {
   assert.throws(() => createCodexLaunchPlans({ platform: "win32", env: { REMODEX_CODEX_BIN: 'C:\\%TEMP%\\codex.cmd' } }));
 });
 
+test("Windows npm shim preserves stdin and arguments through spaces, Unicode and ampersands", { skip: process.platform !== "win32" }, (t) => {
+  const { execFileSync } = require("node:child_process");
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "remodex shim 中文 & "));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const shim = path.join(directory, "codex.cmd");
+  fs.writeFileSync(shim, `@"${process.execPath}" "%~dp0fixture.js" %*\r\n`);
+  fs.writeFileSync(path.join(directory, "fixture.js"), "process.stdout.write(JSON.stringify({args:process.argv.slice(2),input:require('node:fs').readFileSync(0,'utf8')}));");
+  const lookupEnv = { ...process.env };
+  const pathKey = Object.keys(lookupEnv).find((key) => key.toLowerCase() === "path") || "PATH";
+  lookupEnv[pathKey] = `${directory};${lookupEnv[pathKey] || ""}`;
+  assert.equal(require("../src/windows-service").resolveCodexBinary(lookupEnv), shim);
+  const [launch] = createCodexLaunchPlans({ platform: "win32", env: { ...process.env, REMODEX_CODEX_BIN: shim } });
+  const result = JSON.parse(execFileSync(launch.command, launch.args, { ...launch.options, encoding: "utf8", input: "probe\n", timeout: 5000 }));
+  assert.deepEqual(result, { args: ["--no-daemon", "app-server"], input: "probe\n" });
+});
+
 class FakeWebSocket {
   static CONNECTING = 0;
   static OPEN = 1;

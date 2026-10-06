@@ -31,7 +31,7 @@ jobs:
         run: |
           docker compose -f deploy/compose.yaml -f deploy/compose.https.yaml config --quiet
           docker compose -f deploy/compose.yaml -f deploy/compose.existing-proxy.yaml config --quiet
-          docker compose -f deploy/compose.yaml -f deploy/compose.https.yaml run --rm --no-deps caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          docker compose -f deploy/compose.yaml -f deploy/compose.https.yaml run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
       - name: Build and smoke test the production relay image
         run: |
           docker compose -f deploy/compose.yaml -f deploy/compose.existing-proxy.yaml up --build --wait --wait-timeout 90 -d
