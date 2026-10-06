@@ -4,7 +4,7 @@
 <dict>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
-		<string>com.emanueledipietro.CodexMobile.refresh</string>
+		<string>io.github.hchris233.remodex.refresh</string>
 	</array>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
@@ -28,7 +28,7 @@
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
 			<key>CFBundleURLName</key>
-			<string>com.emanueledipietro.CodexMobile.auth</string>
+			<string>io.github.hchris233.remodex.auth</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>phodex</string>
@@ -68,12 +68,6 @@
 	<string>$(PHODEX_CHATGPT_CALLBACK_SCHEME)</string>
 	<key>PHODEX_DEFAULT_RELAY_URL</key>
 	<string>$(PHODEX_DEFAULT_RELAY_URL)</string>
-	<key>REVENUECAT_PUBLIC_API_KEY</key>
-	<string>$(REVENUECAT_PUBLIC_API_KEY)</string>
-	<key>REVENUECAT_ENTITLEMENT_NAME</key>
-	<string>$(REVENUECAT_ENTITLEMENT_NAME)</string>
-	<key>REVENUECAT_DEFAULT_OFFERING_ID</key>
-	<string>$(REVENUECAT_DEFAULT_OFFERING_ID)</string>
 	<key>UIAppFonts</key>
 	<array>
 		<string>JetBrainsMono-Regular.ttf</string>
@@ -99,7 +93,6 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>fetch</string>
-		<string>remote-notification</string>
 	</array>
 	<key>UILaunchScreen</key>
 	<dict>

@@ -17,6 +17,18 @@ const {
   formatCodexLaunchFailure,
 } = require("../src/codex-transport");
 
+test("Windows launch keeps no-daemon and quotes an absolute npm shim", () => {
+  const binary = 'C:\\tools 中文 & work\\codex.cmd';
+  const [launch] = createCodexLaunchPlans({ platform: "win32", env: { REMODEX_CODEX_BIN: binary } });
+  assert.equal(launch.command, "cmd.exe");
+  assert.equal(launch.args.at(-1), `""${binary}" --no-daemon app-server"`);
+  assert.equal(launch.options.windowsHide, true);
+  assert.equal(launch.options.windowsVerbatimArguments, true);
+  const [native] = createCodexLaunchPlans({ platform: "win32", env: { REMODEX_CODEX_BIN: "C:\\tools\\codex.exe" } });
+  assert.deepEqual(native.args, ["--no-daemon", "app-server"]);
+  assert.throws(() => createCodexLaunchPlans({ platform: "win32", env: { REMODEX_CODEX_BIN: 'C:\\%TEMP%\\codex.cmd' } }));
+});
+
 class FakeWebSocket {
   static CONNECTING = 0;
   static OPEN = 1;

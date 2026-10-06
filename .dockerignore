@@ -1,0 +1,6 @@
+**
+!relay
+!relay/*.js
+!relay/package.json
+!relay/package-lock.json
+!relay/Dockerfile

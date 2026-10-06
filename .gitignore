@@ -18,6 +18,8 @@ build/
 # Environment / secrets
 .env
 .env.*
+!deploy/.env.example
+.remodex/
 *.pem
 *.p12
 *.key

@@ -1,0 +1,5 @@
+# Use INSTEAD OF compose.https.yaml when a proxy already owns ports 80/443.
+services:
+  relay:
+    ports:
+      - "127.0.0.1:9000:9000"

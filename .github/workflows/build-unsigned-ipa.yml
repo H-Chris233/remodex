@@ -18,6 +18,8 @@ jobs:
     name: Build unsigned release IPA
     runs-on: macos-26
     timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
 
     defaults:
       run:
@@ -29,6 +31,15 @@ jobs:
 
       - name: Show Xcode version
         run: xcodebuild -version
+
+      - name: Setup Node.js for Swift recovery checks
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Check recovery sends without subscription gating
+        working-directory: phodex-bridge
+        run: node --test test/ios-stream-recovery.test.js
 
       - name: Build unsigned IPA
         run: |
@@ -48,6 +59,7 @@ jobs:
             -configuration Release \
             -destination "generic/platform=iOS" \
             -archivePath "$archive_path" \
+            -onlyUsePackageVersionsFromResolvedFile \
             archive \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
@@ -71,9 +83,22 @@ jobs:
 
           echo "Unsigned IPA created at $ipa_path"
 
+      - name: Validate IPA and write checksum
+        run: python3 scripts/verify-ipa.py build/unsigned-ipa/remodex-unsigned-release.ipa
+
       - name: Upload unsigned IPA artifact
         uses: actions/upload-artifact@v4
         with:
           name: remodex-unsigned-ipa
-          path: build/unsigned-ipa/remodex-unsigned-release.ipa
+          path: |
+            build/unsigned-ipa/remodex-unsigned-release.ipa
+            build/unsigned-ipa/remodex-unsigned-release.ipa.sha256
           if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload failed build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: remodex-build-log
+          path: build/unsigned-ipa/xcodebuild.log

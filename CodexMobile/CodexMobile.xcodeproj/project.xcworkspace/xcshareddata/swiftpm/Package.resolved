@@ -20,15 +20,6 @@
       }
     },
     {
-      "identity" : "purchases-ios-spm",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/RevenueCat/purchases-ios-spm.git",
-      "state" : {
-        "revision" : "629a56ecef190469914b8f0914bf0446363eb09f",
-        "version" : "5.78.0"
-      }
-    },
-    {
       "identity" : "remodextextkit",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/Emanuele-web04/RemodexTextKit.git",

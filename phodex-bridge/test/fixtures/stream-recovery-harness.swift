@@ -12,12 +12,6 @@ struct RPCMessage { var result: JSONValue? = .object(["turnId": .string("continu
     var isSending = false
     var input = "Unsent draft"
 }
-@MainActor final class SubscriptionService {
-    var hasAppAccess = true
-    var consumed = 0
-    func consumeFreeSendAttemptIfNeeded() { consumed += 1 }
-}
-
 @MainActor final class CodexService {
     var isConnected = true
     var isInitialized = true
@@ -226,26 +220,32 @@ struct RPCMessage { var result: JSONValue? = .object(["turnId": .string("continu
 
         let (composed, composedFailure) = fixture()
         let viewModel = TurnViewModel()
-        let subscription = SubscriptionService()
-        viewModel.continueAfterStreamFailure(composedFailure, codex: composed, subscriptions: subscription, threadID: "thread")
-        viewModel.continueAfterStreamFailure(composedFailure, codex: composed, subscriptions: subscription, threadID: "thread")
+        viewModel.continueAfterStreamFailure(composedFailure, codex: composed, threadID: "thread")
+        viewModel.continueAfterStreamFailure(composedFailure, codex: composed, threadID: "thread")
         while viewModel.isSending { await Task.yield() }
-        precondition(composed.requests.count == 1 && subscription.consumed == 1)
+        precondition(composed.requests.count == 1)
         precondition(viewModel.input == "Unsent draft")
 
         let (changed, changedFailure) = fixture()
         let changedViewModel = TurnViewModel()
-        let failedPreflightSubscription = SubscriptionService()
         changed.beforeSnapshot = {
             changed.recoverableStreamFailuresByThread["thread"] = CodexStreamFailure(
                 turnID: "different-failure", message: "new error", runGeneration: 2)
             changed.lastErrorMessage = "new error"
         }
-        changedViewModel.continueAfterStreamFailure(changedFailure, codex: changed, subscriptions: failedPreflightSubscription, threadID: "thread")
+        changedViewModel.continueAfterStreamFailure(changedFailure, codex: changed, threadID: "thread")
         while changedViewModel.isSending { await Task.yield() }
         precondition(changed.requests.isEmpty && changed.lastErrorMessage == "new error")
         precondition(changed.recoverableStreamFailuresByThread["thread"]?.isDismissed == false)
-        precondition(failedPreflightSubscription.consumed == 0, "A failed preflight must not consume a free message")
+
+        // Self-hosted recovery remains usable beyond the former five-send limit.
+        for _ in 0..<7 {
+            let (service, failure) = fixture()
+            let model = TurnViewModel()
+            model.continueAfterStreamFailure(failure, codex: service, threadID: "thread")
+            while model.isSending { await Task.yield() }
+            precondition(service.requests.count == 1)
+        }
 
         for condition in ["stopped", "replay", "old-turn", "synthetic"] {
             let service = CodexService()

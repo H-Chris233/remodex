@@ -7,10 +7,10 @@
 import Foundation
 
 enum AppEnvironment {
+    // Run inside this fork's phodex-bridge checkout, never replace it with the upstream npm package.
+    static let bridgeUpdateCommand = "git pull --ff-only; npm.cmd ci --ignore-scripts; remodex restart"
+
     private static let defaultRelayURLInfoPlistKey = "PHODEX_DEFAULT_RELAY_URL"
-    private static let revenueCatPublicAPIKeyInfoPlistKey = "REVENUECAT_PUBLIC_API_KEY"
-    private static let revenueCatEntitlementNameInfoPlistKey = "REVENUECAT_ENTITLEMENT_NAME"
-    private static let revenueCatDefaultOfferingIDInfoPlistKey = "REVENUECAT_DEFAULT_OFFERING_ID"
     private static let supportEmailAddress = "emandipietro@gmail.com"
 
     // Keeps startup logs concise by default while preserving an explicit deep-diagnostics mode.
@@ -34,22 +34,7 @@ enum AppEnvironment {
         return defaultRelayURLString
     }
 
-    // Reads the public RevenueCat key shipped with the client build.
-    static var revenueCatPublicAPIKey: String? {
-        resolvedString(forInfoPlistKey: revenueCatPublicAPIKeyInfoPlistKey)
-    }
-
-    // Keeps entitlement naming centralized so purchase checks stay consistent.
-    static var revenueCatEntitlementName: String {
-        resolvedString(forInfoPlistKey: revenueCatEntitlementNameInfoPlistKey) ?? "Pro"
-    }
-
-    // Mirrors the RevenueCat default offering ID used in the dashboard.
-    static var revenueCatDefaultOfferingID: String {
-        resolvedString(forInfoPlistKey: revenueCatDefaultOfferingIDInfoPlistKey) ?? "default"
-    }
-
-    // Legal links shown in the paywall footer and Settings.
+    // Upstream legal attribution shown in Settings.
     // Keep these pointed at a public source-of-truth until the website serves dedicated legal routes.
     static let privacyPolicyURL = URL(
         string: "https://github.com/Emanuele-web04/remodex/blob/main/Legal/PRIVACY_POLICY.md"

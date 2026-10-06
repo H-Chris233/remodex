@@ -21,7 +21,7 @@ final class QRScannerPairingValidatorTests: XCTestCase {
         }
 
         XCTAssertEqual(prompt.title, "Update Remodex on your Mac before scanning")
-        XCTAssertEqual(prompt.command, "npm install -g remodex@latest")
+        XCTAssertEqual(prompt.command, AppEnvironment.bridgeUpdateCommand)
         XCTAssertTrue(prompt.message.contains("different Remodex npm version"))
     }
 
@@ -34,7 +34,7 @@ final class QRScannerPairingValidatorTests: XCTestCase {
             return XCTFail("Expected a bridge update prompt for legacy pairing payloads.")
         }
 
-        XCTAssertEqual(prompt.command, "npm install -g remodex@latest")
+        XCTAssertEqual(prompt.command, AppEnvironment.bridgeUpdateCommand)
         XCTAssertTrue(prompt.message.contains("older Remodex bridge"))
     }
 

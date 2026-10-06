@@ -1,0 +1,6 @@
+{$REMODEX_DOMAIN} {
+    reverse_proxy relay:9000 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+    }
+}

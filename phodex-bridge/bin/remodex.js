@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // FILE: remodex.js
-// Purpose: CLI surface for foreground bridge runs, pairing reset, thread resume, and macOS service control.
+// Purpose: CLI surface for foreground bridge runs, pairing reset, thread resume, and macOS/Windows service control.
 // Layer: CLI binary
 // Exports: none
 // Depends on: ../src
@@ -22,8 +22,10 @@ const {
   watchThreadRollout,
 } = require("../src");
 const { version } = require("../package.json");
+const { runWindowsServiceCommand } = require("../src/windows-service");
 
 const defaultDeps = {
+  runWindowsServiceCommand,
   getMacOSBridgeServiceStatus,
   printMacOSBridgePairingQr,
   printMacOSBridgeServiceStatus,
@@ -75,6 +77,10 @@ async function main({
 
   if (isVersionCommand(command)) {
     emitVersion({ jsonOutput, consoleImpl });
+    return;
+  }
+
+  if (platform === "win32" && await deps.runWindowsServiceCommand(command, { jsonOutput, consoleImpl })) {
     return;
   }
 

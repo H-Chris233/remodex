@@ -14,7 +14,7 @@ struct OnboardingView: View {
 
     private let pageCount = 5
     private let codexInstallStepIndex = 2
-    private let codexInstallCommand = "npm install -g @openai/codex@latest"
+    private let codexInstallCommand = "codex --no-daemon --version"
 
     var body: some View {
         ZStack {
@@ -31,7 +31,7 @@ struct OnboardingView: View {
                     OnboardingStepPage(
                         stepNumber: 1,
                         icon: "terminal",
-                        title: "Install Codex CLI",
+                        title: "Check Codex CLI",
                         description: "The AI coding agent that lives in your terminal. Remodex connects to it from your iPhone.",
                         command: codexInstallCommand
                     )
@@ -40,10 +40,10 @@ struct OnboardingView: View {
                     OnboardingStepPage(
                         stepNumber: 2,
                         icon: "link",
-                        title: "Install the Bridge",
-                        description: "A lightweight relay that securely connects your device to your iPhone.",
-                        command: "npm install -g remodex@latest",
-                        commandCaption: "Remodex can keep your device awake with macOS caffeinate while the bridge is running, but it starts disabled by default. You can enable it later in Settings if you want."
+                        title: "Clone Your Bridge",
+                        description: "Use your personal bridge fork on Windows.",
+                        command: "git clone https://github.com/H-Chris233/remodex.git",
+                        commandCaption: "In phodex-bridge, run npm.cmd ci --ignore-scripts and npm.cmd link --ignore-scripts. Set REMODEX_RELAY to your VPS URL before pairing."
                     )
                     .tag(3)
 
@@ -51,7 +51,7 @@ struct OnboardingView: View {
                         stepNumber: 3,
                         icon: "qrcode.viewfinder",
                         title: "Start Pairing",
-                        description: "Run this on your device. A QR code will appear in your terminal — scan it next.",
+                        description: "After configuring your VPS relay, start the Windows background bridge and scan its QR code.",
                         command: "remodex up"
                     )
                     .tag(4)
@@ -62,13 +62,13 @@ struct OnboardingView: View {
             }
         }
         .preferredColorScheme(.dark)
-        .alert("Install Codex CLI First", isPresented: $isShowingCodexInstallReminder) {
+        .alert("Check Codex CLI First", isPresented: $isShowingCodexInstallReminder) {
             Button("Stay Here", role: .cancel) {}
             Button("Understood") {
                 advanceToNextPage()
             }
         } message: {
-            Text("Copy and paste \"\(codexInstallCommand)\" on your device before moving on. Remodex will not work until Codex CLI is installed and available in your PATH.")
+            Text("Copy and paste \"\(codexInstallCommand)\" on your device before moving on. Use an existing Codex installation and finish signing in on Windows first.")
         }
     }
 

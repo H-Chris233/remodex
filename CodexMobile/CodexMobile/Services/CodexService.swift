@@ -907,7 +907,8 @@ final class CodexService {
         self.decoder = decoder
         self.defaults = defaults
         self.userNotificationCenter = userNotificationCenter ?? UNUserNotificationCenter.current()
-        self.remoteNotificationRegistrar = remoteNotificationRegistrar ?? CodexApplicationRemoteNotificationRegistrar()
+        // Side-loaded self-hosted builds use local notifications without APNs credentials.
+        self.remoteNotificationRegistrar = remoteNotificationRegistrar
         self.phoneIdentityState = codexPhoneIdentityStateFromSecureStore()
         self.trustedMacRegistry = codexTrustedMacRegistryFromSecureStore()
         self.currentTrustedMacDeviceId = SecureStore.readString(for: CodexSecureKeys.currentTrustedMacDeviceId)

@@ -150,7 +150,7 @@ final class CodexGPTAccountTests: XCTestCase {
             service.bridgeUpdatePrompt?.title,
             "A newer Remodex update is available on your Mac"
         )
-        XCTAssertEqual(service.bridgeUpdatePrompt?.command, "npm install -g remodex@latest")
+        XCTAssertEqual(service.bridgeUpdatePrompt?.command, AppEnvironment.bridgeUpdateCommand)
         XCTAssertEqual(service.gptAccountSnapshot.status, .unknown)
     }
 
@@ -182,7 +182,7 @@ final class CodexGPTAccountTests: XCTestCase {
             service.bridgeUpdatePrompt?.message,
             "This device bridge is running Remodex 3.2.0, but this iPhone app requires Remodex 4.0.0 or newer. Update the npm package on your device, then reconnect."
         )
-        XCTAssertEqual(service.bridgeUpdatePrompt?.command, "npm install -g remodex@latest")
+        XCTAssertEqual(service.bridgeUpdatePrompt?.command, AppEnvironment.bridgeUpdateCommand)
     }
 
     func testRefreshBridgeVersionStateDoesNotPresentOptionalBridgeUpdateWithoutForegroundFlag() async {

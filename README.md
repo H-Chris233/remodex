@@ -4,6 +4,11 @@
 
 # Remodex
 
+> **Personal self-hosted fork:** Windows background bridge, VPS relay, and unsigned
+> iOS builds. Start with [the self-hosted setup](deploy/README.md). Use this fork's
+> bridge checkout instead of the upstream npm install/update commands below.
+> Original upstream attribution and documentation are retained below.
+
 [![npm version](https://img.shields.io/npm/v/remodex)](https://www.npmjs.com/package/remodex)
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [Follow on X](https://x.com/emanueledpt)

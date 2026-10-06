@@ -1,0 +1,23 @@
+name: remodex
+services:
+  relay:
+    build:
+      context: ..
+      dockerfile: relay/Dockerfile
+    image: remodex-relay:local
+    restart: unless-stopped
+    environment:
+      PORT: "9000"
+      RELAY_BIND_HOST: 0.0.0.0
+      REMODEX_ENABLE_PUSH_SERVICE: "false"
+      REMODEX_TRUST_PROXY: "true"
+    expose:
+      - "9000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

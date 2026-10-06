@@ -182,14 +182,25 @@ function createCodexLaunchPlans({
   };
 
   if (platform === "win32") {
+    const binary = env.REMODEX_CODEX_BIN || "";
+    if (binary && (!path.win32.isAbsolute(binary) || /["\r\n%]/.test(binary) || !/\.(exe|cmd)$/i.test(binary))) {
+      throw new Error("REMODEX_CODEX_BIN must be an absolute .exe/.cmd path without quotes, newlines, or percent expansion.");
+    }
+    if (/\.exe$/i.test(binary)) {
+      return [{ command: binary, args: ["--no-daemon", "app-server"],
+        options: { ...sharedOptions, windowsHide: true }, description: "`codex --no-daemon app-server`" }];
+    }
     return [{
       command: env.ComSpec || "cmd.exe",
-      args: ["/d", "/c", "codex app-server"],
+      args: binary
+        ? ["/d", "/s", "/v:off", "/c", `""${binary}" --no-daemon app-server"`]
+        : ["/d", "/c", "codex --no-daemon app-server"],
       options: {
         ...sharedOptions,
         windowsHide: true,
+        ...(binary ? { windowsVerbatimArguments: true } : {}),
       },
-      description: "`cmd.exe /d /c codex app-server`",
+      description: "`codex --no-daemon app-server`",
     }];
   }
 

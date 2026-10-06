@@ -899,7 +899,7 @@ private extension CodexService {
         bridgeUpdatePrompt = CodexBridgeUpdatePrompt(
             title: "Update the Remodex package on your device",
             message: message,
-            command: "npm install -g remodex@latest"
+            command: AppEnvironment.bridgeUpdateCommand
         )
     }
 

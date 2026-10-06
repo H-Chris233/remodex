@@ -1,0 +1,43 @@
+name: Self-hosted checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+        working-directory: phodex-bridge
+      - name: Test launch, lifecycle and real scheduled task isolation
+        working-directory: phodex-bridge
+        run: node --test test/codex-transport.test.js test/remodex-cli.test.js test/windows-service.test.js test/windows-task-integration.test.js
+  deployment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate both deployment configurations
+        env:
+          REMODEX_DOMAIN: relay.example.com
+        run: |
+          docker compose -f deploy/compose.yaml -f deploy/compose.https.yaml config --quiet
+          docker compose -f deploy/compose.yaml -f deploy/compose.existing-proxy.yaml config --quiet
+          docker compose -f deploy/compose.yaml -f deploy/compose.https.yaml run --rm --no-deps caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+      - name: Build and smoke test the production relay image
+        run: |
+          docker compose -f deploy/compose.yaml -f deploy/compose.existing-proxy.yaml up --build --wait --wait-timeout 90 -d
+          curl --fail --silent http://127.0.0.1:9000/health | python3 -c 'import json,sys; assert json.load(sys.stdin)["ok"] is True'
+      - name: Relay logs and cleanup
+        if: always()
+        run: |
+          docker compose -f deploy/compose.yaml -f deploy/compose.existing-proxy.yaml logs
+          docker compose -f deploy/compose.yaml -f deploy/compose.existing-proxy.yaml down

@@ -18,18 +18,6 @@ protocol CodexRemoteNotificationRegistering: AnyObject {
     func registerForRemoteNotifications()
 }
 
-final class CodexApplicationRemoteNotificationRegistrar: CodexRemoteNotificationRegistering {
-    // Requests the APNs device token once alert permission is no longer denied.
-    @MainActor
-    func registerForRemoteNotifications() {
-#if targetEnvironment(simulator)
-        return
-#else
-        UIApplication.shared.registerForRemoteNotifications()
-#endif
-    }
-}
-
 private enum CodexPushAPNsEnvironment: String {
     case development
     case production
@@ -114,13 +102,12 @@ extension CodexService {
             return
         }
 
-        if remoteNotificationRegistrar == nil {
-            remoteNotificationRegistrar = CodexApplicationRemoteNotificationRegistrar()
-        }
         let delegateProxy = CodexNotificationCenterDelegateProxy(service: self)
         notificationCenterDelegateProxy = delegateProxy
         userNotificationCenter.delegate = delegateProxy
-        configureRemoteNotificationObservers()
+        if remoteNotificationRegistrar != nil {
+            configureRemoteNotificationObservers()
+        }
         hasConfiguredNotifications = true
 
         Task { @MainActor [weak self] in
@@ -178,6 +165,7 @@ extension CodexService {
 
     // Persists the APNs token and syncs it to the paired bridge when possible.
     func handleRemoteNotificationDeviceToken(_ deviceToken: Data) {
+        guard remoteNotificationRegistrar != nil else { return }
         let token = deviceToken.map { String(format: "%02x", $0) }.joined()
         guard !token.isEmpty else {
             return
@@ -193,6 +181,10 @@ extension CodexService {
 
     // Push token sync is best-effort so reconnects stay resilient if the managed backend is unavailable.
     func syncManagedPushRegistrationIfNeeded(force: Bool = false) async {
+        guard remoteNotificationRegistrar != nil else {
+            completionPushSessionID = nil
+            return
+        }
         guard isConnected, isInitialized else {
             return
         }

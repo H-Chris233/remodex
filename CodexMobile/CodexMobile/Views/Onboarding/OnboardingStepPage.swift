@@ -127,7 +127,7 @@ struct OnboardingStepPage: View {
             icon: "link",
             title: "Install the Bridge",
             description: "A lightweight relay that securely connects your device to your iPhone.",
-            command: "npm install -g remodex@latest",
+            command: AppEnvironment.bridgeUpdateCommand,
             commandCaption: "Remodex can keep your device awake with macOS caffeinate while the bridge is running, but it starts disabled by default. You can enable it later in Settings if you want."
         )
     }

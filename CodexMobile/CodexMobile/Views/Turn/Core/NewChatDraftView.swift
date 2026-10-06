@@ -58,7 +58,6 @@ private enum NewChatDraftRuntimeMode {
 
 struct NewChatDraftView: View {
     @Environment(CodexService.self) private var codex
-    @Environment(SubscriptionService.self) private var subscriptions
     @Environment(\.openURL) private var openURL
     @Environment(\.reconnectAction) private var reconnectAction
     @Environment(\.scenePhase) private var scenePhase
@@ -1187,7 +1186,6 @@ struct NewChatDraftView: View {
             await Task.yield()
             viewModel.sendNewThread(
                 codex: codex,
-                subscriptions: subscriptions,
                 draftThreadID: route.id,
                 preferredProjectPath: selectedProjectPath,
                 runtimeProvider: frozenProvider,
@@ -1328,7 +1326,6 @@ private enum NewChatDraftSheet: String, Identifiable {
         )
     }
     .environment(CodexService())
-    .environment(SubscriptionService())
 }
 
 #Preview("New Chat Draft – No Folder") {
@@ -1343,7 +1340,6 @@ private enum NewChatDraftSheet: String, Identifiable {
         )
     }
     .environment(CodexService())
-    .environment(SubscriptionService())
 }
 
 #Preview("New Chat Draft – Folder Button") {
@@ -1358,5 +1354,4 @@ private enum NewChatDraftSheet: String, Identifiable {
         )
     }
     .environment(CodexService())
-    .environment(SubscriptionService())
 }

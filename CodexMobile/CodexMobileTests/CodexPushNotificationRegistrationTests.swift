@@ -12,6 +12,28 @@ import UserNotifications
 final class CodexPushNotificationRegistrationTests: XCTestCase {
     private static var retainedServices: [CodexService] = []
 
+    func testSelfHostedDefaultsKeepLocalPermissionWithoutAPNsRegistration() async {
+        let center = MockUserNotificationCenter(status: .authorized)
+        let service = CodexService(userNotificationCenter: center)
+        Self.retainedServices.append(service)
+        service.isConnected = true
+        service.isInitialized = true
+        service.remoteNotificationDeviceToken = "previous-install-token"
+        var requests = 0
+        service.requestTransportOverride = { _, _ in
+            requests += 1
+            return RPCMessage(id: .integer(1), result: .object([:]))
+        }
+
+        await service.requestNotificationPermission(markPrompted: false)
+        await service.syncManagedPushRegistrationIfNeeded(force: true)
+
+        XCTAssertNil(service.remoteNotificationRegistrar)
+        XCTAssertEqual(service.notificationAuthorizationStatus, .authorized)
+        XCTAssertEqual(requests, 0)
+        XCTAssertFalse(service.usesRemoteCompletionNotifications)
+    }
+
     func testRequestNotificationPermissionRegistersForRemoteNotificationsWhenAuthorized() async {
         let center = MockUserNotificationCenter(status: .authorized)
         let registrar = MockRemoteNotificationRegistrar()

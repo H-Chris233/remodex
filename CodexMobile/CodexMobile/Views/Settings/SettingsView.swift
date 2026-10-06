@@ -4,7 +4,6 @@
 // Exports: SettingsView
 
 import SwiftUI
-import StoreKit
 import UIKit
 
 private struct SettingsComputerNamePresentation: Identifiable, Equatable {
@@ -19,7 +18,6 @@ private enum SettingsSheet: Identifiable, Equatable {
     case computerName(SettingsComputerNamePresentation)
     case commandReference
     case macLoginInfo
-    case paywall
 
     var id: String {
         switch self {
@@ -29,23 +27,18 @@ private enum SettingsSheet: Identifiable, Equatable {
             return "commandReference"
         case .macLoginInfo:
             return "macLoginInfo"
-        case .paywall:
-            return "paywall"
         }
     }
 }
 
-// One active presentation at a time so sheets and offer-code redemption
-// never compete while Settings is already inside a full-screen cover.
+// Keep one sheet active while Settings is inside a full-screen cover.
 private enum SettingsActivePresentation: Equatable {
     case none
     case sheet(SettingsSheet)
-    case offerCodeRedemption
 }
 
 struct SettingsView: View {
     @Environment(CodexService.self) private var codex
-    @Environment(SubscriptionService.self) private var subscriptions
     @AppStorage("codex.appFontStyle") private var appFontStyleRawValue = AppFont.defaultStoredStyleRawValue
     @State private var activePresentation: SettingsActivePresentation = .none
     @State private var isShowingAboutRemodex = false
@@ -58,14 +51,6 @@ struct SettingsView: View {
             SettingsBridgeVersionCard {
                 presentSettingsSheet(.commandReference)
             }
-            SettingsSubscriptionCard(
-                onShowPaywall: {
-                    presentSettingsSheet(.paywall)
-                },
-                onRedeemCode: {
-                    presentOfferCodeRedemption()
-                }
-            )
             SettingsUsageCard()
             SettingsGPTAccountCard {
                 presentSettingsSheet(.macLoginInfo)
@@ -91,9 +76,6 @@ struct SettingsView: View {
         .sheet(item: activeSheetBinding) { sheet in
             settingsSheetContent(for: sheet)
         }
-        .offerCodeRedemption(isPresented: isPresentingOfferCodeRedemption) { result in
-            handleOfferCodeRedemptionCompletion(result)
-        }
     }
 
     private var activeSheetBinding: Binding<SettingsSheet?> {
@@ -114,24 +96,6 @@ struct SettingsView: View {
         )
     }
 
-    private var isPresentingOfferCodeRedemption: Binding<Bool> {
-        Binding(
-            get: {
-                if case .offerCodeRedemption = activePresentation {
-                    return true
-                }
-                return false
-            },
-            set: { isPresented in
-                if isPresented {
-                    activePresentation = .offerCodeRedemption
-                } else if case .offerCodeRedemption = activePresentation {
-                    activePresentation = .none
-                }
-            }
-        )
-    }
-
     @ViewBuilder
     private func settingsSheetContent(for sheet: SettingsSheet) -> some View {
         switch sheet {
@@ -145,18 +109,6 @@ struct SettingsView: View {
             SettingsCommandReferenceSheet()
         case .macLoginInfo:
             GPTVoiceSetupSheet()
-        case .paywall:
-            RevenueCatPaywallView()
-        }
-    }
-
-    private func handleOfferCodeRedemptionCompletion(_ result: Result<Void, Error>) {
-        Task {
-            if case .failure = result {
-                await subscriptions.refreshCustomerInfoSilently()
-            } else {
-                await subscriptions.syncPurchasesAfterOfferCodeRedemption()
-            }
         }
     }
 
@@ -166,22 +118,6 @@ struct SettingsView: View {
 
     private func presentSettingsSheet(_ sheet: SettingsSheet) {
         activePresentation = .sheet(sheet)
-    }
-
-    private func presentOfferCodeRedemption() {
-        switch activePresentation {
-        case .none:
-            activePresentation = .offerCodeRedemption
-        case .sheet:
-            activePresentation = .none
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(350))
-                guard activePresentation == .none else { return }
-                activePresentation = .offerCodeRedemption
-            }
-        case .offerCodeRedemption:
-            break
-        }
     }
 
     private var appFontStyleBinding: Binding<AppFont.Style> {
