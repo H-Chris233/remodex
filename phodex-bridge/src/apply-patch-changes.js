@@ -157,7 +157,7 @@ function gitPatchPath(prefix, filePath) {
 }
 
 function normalizePatchPath(rawPath, cwd) {
-  const filePath = readString(rawPath);
+  const filePath = readString(rawPath).split(path.sep).join("/");
   if (!filePath) {
     return "";
   }
@@ -172,7 +172,7 @@ function normalizePatchPath(rawPath, cwd) {
     return filePath;
   }
 
-  return relativePath;
+  return relativePath.split(path.sep).join("/");
 }
 
 function readString(value) {

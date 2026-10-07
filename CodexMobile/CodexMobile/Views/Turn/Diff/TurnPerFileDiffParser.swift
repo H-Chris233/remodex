@@ -30,8 +30,9 @@ enum FileChangePathIdentity {
     // Treats absolute-vs-relative references to the same repo file as one identity,
     // while keeping same-named files in different directories separate.
     static func representsSameFile(_ lhs: String, _ rhs: String) -> Bool {
-        let normalizedLHS = normalizedPath(lhs)
-        let normalizedRHS = normalizedPath(rhs)
+        let windowsSeparators = isWindowsAbsolutePath(lhs) || isWindowsAbsolutePath(rhs)
+        let normalizedLHS = normalizedPath(lhs, windowsSeparators: windowsSeparators)
+        let normalizedRHS = normalizedPath(rhs, windowsSeparators: windowsSeparators)
 
         guard !normalizedLHS.isEmpty, !normalizedRHS.isEmpty else {
             return false
@@ -68,8 +69,12 @@ enum FileChangePathIdentity {
         return trimmedLHS
     }
 
-    static func normalizedPath(_ rawPath: String) -> String {
+    static func normalizedPath(_ rawPath: String, windowsSeparators: Bool = false) -> String {
         var normalized = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A backslash remains a valid POSIX filename character outside Windows context.
+        if windowsSeparators {
+            normalized = normalized.replacingOccurrences(of: "\\", with: "/")
+        }
         if normalized.hasPrefix("a/") || normalized.hasPrefix("b/") {
             normalized = String(normalized.dropFirst(2))
         }
@@ -84,6 +89,12 @@ enum FileChangePathIdentity {
 
     private static func isAbsolutePath(_ rawPath: String) -> Bool {
         rawPath.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/")
+            || isWindowsAbsolutePath(rawPath)
+    }
+
+    private static func isWindowsAbsolutePath(_ rawPath: String) -> Bool {
+        rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+            .range(of: #"^[A-Za-z]:[\\/]"#, options: .regularExpression) != nil
     }
 }
 

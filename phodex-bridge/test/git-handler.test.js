@@ -45,6 +45,22 @@ function canonicalPath(candidatePath) {
   return fs.realpathSync.native(candidatePath);
 }
 
+test("directory containment accepts Git/native paths and rejects siblings and escapes", () => {
+  const root = path.join(os.tmpdir(), "remodex-containment");
+  const gitRoot = root.split(path.sep).join("/");
+  assert.equal(__test.isPathContainedIn(root, gitRoot), true);
+  assert.equal(__test.isPathContainedIn(path.join(root, "project"), gitRoot), true);
+  assert.equal(__test.isPathContainedIn(path.join(root, "..notes"), gitRoot), true);
+  assert.equal(__test.isPathContainedIn(`${root}-other`, gitRoot), false);
+  assert.equal(__test.isPathContainedIn(path.join(root, "..", "outside"), gitRoot), false);
+  assert.equal(__test.isPathContainedIn(root, null), false);
+  if (process.platform === "win32") {
+    assert.equal(__test.isPathContainedIn(path.join(root, "project"), gitRoot.toUpperCase()), true);
+    const otherDrive = root.startsWith("D:") ? "E:" : "D:";
+    assert.equal(__test.isPathContainedIn(`${otherDrive}/outside`, gitRoot), false);
+  }
+});
+
 function makeBareRemote() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "remodex-git-handler-remote-"));
 }
@@ -1247,7 +1263,7 @@ test("gitCreateManagedWorktree creates a detached managed worktree under CODEX_H
   }
 });
 
-test("gitCreateManagedWorktree copies .worktreeinclude-listed files into the new worktree", async () => {
+test("gitCreateManagedWorktree copies .worktreeinclude-listed files into the new worktree", async (t) => {
   const repoDir = makeTempRepo();
   const projectDir = path.join(repoDir, "phodex-bridge");
   const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-codex-home-"));
@@ -1265,7 +1281,13 @@ test("gitCreateManagedWorktree copies .worktreeinclude-listed files into the new
     fs.writeFileSync(path.join(repoDir, "notes.local"), "plain untracked\n");
     fs.writeFileSync(path.join(repoDir, "ignored-not-listed.txt"), "skip me\n");
     // Symlinked sources never travel: they could smuggle out-of-repo content.
-    fs.symlinkSync(path.join(repoDir, ".env"), path.join(repoDir, "link.env"));
+    try {
+      fs.symlinkSync(path.join(repoDir, ".env"), path.join(repoDir, "link.env"));
+    } catch (error) {
+      if (process.platform !== "win32" || error.code !== "EPERM") throw error;
+      // Keep the file-copy regression running without Windows symlink privileges.
+      t.diagnostic("File symlink creation unavailable; regular manifest files are still checked.");
+    }
     fs.writeFileSync(
       path.join(repoDir, ".worktreeinclude"),
       "# required non-tracked files\n.env\nnotes.local\nlink.env\nmissing-entry.txt\n"
@@ -1293,6 +1315,34 @@ test("gitCreateManagedWorktree copies .worktreeinclude-listed files into the new
     } else {
       process.env.CODEX_HOME = previousCodexHome;
     }
+    fs.rmSync(repoDir, { recursive: true, force: true });
+    fs.rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("gitCreateManagedWorktree copies .worktreeinclude files through a CODEX_HOME directory alias", async () => {
+  const repoDir = makeTempRepo();
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-codex-home-"));
+  const actualHome = path.join(codexHome, "actual");
+  const aliasHome = path.join(codexHome, "alias");
+  const previousCodexHome = process.env.CODEX_HOME;
+  try {
+    fs.mkdirSync(actualHome);
+    fs.symlinkSync(actualHome, aliasHome, process.platform === "win32" ? "junction" : "dir");
+    process.env.CODEX_HOME = aliasHome;
+    fs.writeFileSync(path.join(repoDir, ".gitignore"), ".env\n");
+    fs.writeFileSync(path.join(repoDir, ".env"), "CONFIG=keep\n");
+    fs.writeFileSync(path.join(repoDir, ".worktreeinclude"), ".env\n");
+    git(repoDir, "add", ".gitignore", ".worktreeinclude");
+    git(repoDir, "commit", "-m", "Add include manifest");
+
+    const created = await __test.gitCreateManagedWorktree(repoDir, {
+      baseBranch: "main", changeTransfer: "none",
+    });
+    assert.equal(fs.readFileSync(path.join(created.worktreePath, ".env"), "utf8"), "CONFIG=keep\n");
+  } finally {
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
     fs.rmSync(repoDir, { recursive: true, force: true });
     fs.rmSync(codexHome, { recursive: true, force: true });
   }

@@ -20,6 +20,12 @@ jobs:
       - name: Test launch, lifecycle and real scheduled task isolation
         working-directory: phodex-bridge
         run: node --test test/codex-transport.test.js test/remodex-cli.test.js test/windows-service.test.js test/windows-task-integration.test.js
+      - name: Test Windows worktree copying and cleanup protection
+        working-directory: phodex-bridge
+        run: node --test --test-name-pattern='directory containment|worktreeinclude|safe worktree cleanup' test/git-handler.test.js
+      - name: Test file change history and live mirroring
+        working-directory: phodex-bridge
+        run: node --test test/bridge.test.js test/session-jsonl-history.test.js test/rollout-live-mirror.test.js
   deployment:
     runs-on: ubuntu-latest
     timeout-minutes: 15

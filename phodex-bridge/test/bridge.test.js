@@ -9,6 +9,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { buildApplyPatchFileChangeItem } = require("../src/apply-patch-changes");
 const { invalidateRolloutLookupCache } = require("../src/rollout-watch");
 const {
   annotateTurnStateProbeWithMirrorActiveTurn,
@@ -2511,6 +2512,30 @@ test("sanitizeThreadHistoryImagesForRelay folds live-owner assistant ids into JS
     "the folded row must adopt the JSONL turn+text source alias"
   );
   assert.equal(assistantItems[0].remodexSourceItemKey.startsWith(`${turnId}:`), true);
+});
+
+test("apply_patch file changes use slash paths for native relative, absolute, and renamed files", () => {
+  const cwd = path.resolve("workspace");
+  const originalPath = path.join("Sources", "App.swift");
+  const renamedPath = path.join("Sources", "Renamed.swift");
+  for (const rawPath of [originalPath, path.join(cwd, originalPath)]) {
+    const item = buildApplyPatchFileChangeItem({
+      cwd,
+      patch: [
+        "*** Begin Patch",
+        `*** Update File: ${rawPath}`,
+        `*** Move to: ${path.join(cwd, renamedPath)}`,
+        "@@",
+        "-old",
+        "+new",
+        "*** End Patch",
+      ].join("\n"),
+    });
+
+    assert.equal(item.changes[0].path, "Sources/Renamed.swift");
+    assert.match(item.changes[0].diff, /^diff --git a\/Sources\/App\.swift b\/Sources\/Renamed\.swift\n/);
+    assert.match(item.changes[0].diff, /\nrename from Sources\/App\.swift\nrename to Sources\/Renamed\.swift\n/);
+  }
 });
 
 test("sanitizeThreadHistoryImagesForRelay augments app-server history with JSONL fileChange blocks", (t) => {

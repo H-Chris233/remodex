@@ -2131,7 +2131,11 @@ async function copyWorktreeIncludeEntry(sourcePath, destinationPath, canonicalWo
 }
 
 function isPathContainedIn(candidatePath, rootPath) {
-  return candidatePath === rootPath || candidatePath.startsWith(rootPath + path.sep);
+  if (!candidatePath || !rootPath) return false;
+  // Git uses slash paths on Windows; keep nonexistent copy targets in the same namespace.
+  const relative = path.relative(rootPath, candidatePath);
+  return relative === "" || (relative !== ".."
+    && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
 async function cleanupManagedWorktree(repoRoot, worktreeRootPath, branchName = null) {
@@ -2268,6 +2272,7 @@ function catalogRowDirectory(row) {
 }
 
 async function assertWorktreeHasNoBoundChats(worktreeRootPath, { sendCodexRequest, listOpenCodeSessions } = {}) {
+  const canonicalRoot = normalizeExistingPath(worktreeRootPath);
   if (typeof sendCodexRequest !== "function" || typeof listOpenCodeSessions !== "function") {
     throw gitError("worktree_usage_unknown", "Could not verify which chats use this worktree.");
   }
@@ -2294,7 +2299,7 @@ async function assertWorktreeHasNoBoundChats(worktreeRootPath, { sendCodexReques
       throw gitError("worktree_usage_unknown", "A chat has no known folder, so this worktree cannot be removed safely.");
     }
     const normalizedDirectory = normalizeExistingPath(directory);
-    if (normalizedDirectory && isPathContainedIn(normalizedDirectory, worktreeRootPath)) {
+    if (normalizedDirectory && isPathContainedIn(normalizedDirectory, canonicalRoot)) {
       throw gitError("worktree_in_use", "Another chat still uses this worktree. Move or archive its contents before removing the checkout.");
     }
   }
@@ -2320,7 +2325,7 @@ async function assertWorktreeHasNoBoundChats(worktreeRootPath, { sendCodexReques
       verifiedCodexThreads.add(threadId);
     }
     const normalizedDirectory = directory ? normalizeExistingPath(directory) : null;
-    if (normalizedDirectory && isPathContainedIn(normalizedDirectory, worktreeRootPath)) {
+    if (normalizedDirectory && isPathContainedIn(normalizedDirectory, canonicalRoot)) {
       throw gitError("worktree_in_use", "Another chat still uses this worktree. Move its chat to Local before removing the checkout.");
     }
   }
@@ -3069,6 +3074,7 @@ module.exports = {
     gitRemoveWorktree,
     gitListManagedWorktrees,
     isManagedWorktreePath,
+    isPathContainedIn,
     normalizeBranchListEntry,
     normalizeCreatedBranchName,
     parseWorktreePathByBranch,
