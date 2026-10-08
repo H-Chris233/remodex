@@ -837,6 +837,61 @@ test("gitCreatePullRequest creates a real GitHub PR through gh", async () => {
   }
 });
 
+for (const action of ["commit", "commit_push"]) {
+  test(`gitRunStackedAction ${action} creates the first commit on an unborn branch`, async () => {
+    const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-git-handler-first-commit-"));
+    const remoteDir = action === "commit_push" ? makeBareRemote() : null;
+
+    try {
+      git(repoDir, "init", "-b", "main");
+      git(repoDir, "config", "core.autocrlf", "false");
+      git(repoDir, "config", "user.name", "Remodex Tests");
+      git(repoDir, "config", "user.email", "tests@example.com");
+      fs.writeFileSync(path.join(repoDir, "README.md"), "# First commit\n");
+      if (remoteDir) {
+        git(remoteDir, "init", "--bare");
+        git(repoDir, "remote", "add", "origin", remoteDir);
+      }
+
+      const result = await __test.gitRunStackedAction(repoDir, {
+        action,
+        commitMessage: "Create first commit",
+      });
+
+      assert.equal(result.commit.status, "created");
+      assert.equal(result.commit.hash, git(repoDir, "rev-parse", "--short", "HEAD"));
+      assert.equal(result.commit.commitSha, result.commit.hash);
+      assert.equal(result.commit.branch, "main");
+      assert.equal(result.status.branch, "main");
+      assert.equal(result.status.hasHeadCommit, true);
+      assert.equal(git(repoDir, "rev-list", "--count", "HEAD"), "1");
+      assert.equal(git(repoDir, "status", "--porcelain"), "");
+      if (remoteDir) {
+        assert.equal(result.push.state, "pushed");
+        assert.equal(git(remoteDir, "rev-parse", "refs/heads/main"), git(repoDir, "rev-parse", "HEAD"));
+      }
+    } finally {
+      assert.equal(path.dirname(repoDir), os.tmpdir());
+      fs.rmSync(repoDir, { recursive: true, force: true });
+      if (remoteDir) {
+        assert.equal(path.dirname(remoteDir), os.tmpdir());
+        fs.rmSync(remoteDir, { recursive: true, force: true });
+      }
+    }
+  });
+}
+
+test("gitCreatePullRequest rejects detached HEAD with no_branch", async () => {
+  const repoDir = makeTempRepo();
+  try {
+    git(repoDir, "checkout", "--detach");
+    await assert.rejects(__test.gitCreatePullRequest(repoDir, {}), { errorCode: "no_branch" });
+  } finally {
+    assert.equal(path.dirname(repoDir), os.tmpdir());
+    fs.rmSync(repoDir, { recursive: true, force: true });
+  }
+});
+
 test("gitRunStackedAction commits pushes and creates a PR", async () => {
   const repoDir = makeTempRepo();
   const remoteDir = makeBareRemote();

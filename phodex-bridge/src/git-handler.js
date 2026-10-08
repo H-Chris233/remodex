@@ -303,7 +303,7 @@ async function gitCommit(cwd, params) {
   await git(cwd, "add", "-A");
   const output = await git(cwd, "commit", "-m", message);
 
-  const hashMatch = output.match(/\[(\S+)\s+([a-f0-9]+)\]/);
+  const hashMatch = output.match(/\[(\S+)(?:\s+\([^)]+\))?\s+([a-f0-9]+)\]/);
   const hash = hashMatch ? hashMatch[2] : "";
   const branch = hashMatch ? hashMatch[1] : "";
   const summaryMatch = output.match(/\d+ files? changed/);
@@ -431,8 +431,7 @@ async function gitPush(cwd) {
     }
     const remote = trackingRemoteName(tracking) || "origin";
 
-    const branchOutput = await git(cwd, "rev-parse", "--abbrev-ref", "HEAD");
-    const branch = branchOutput.trim();
+    const branch = await currentBranchName(cwd);
 
     // Try normal push first; if no upstream, set it
     try {
@@ -1247,7 +1246,7 @@ async function branchExists(cwd, branchName) {
 }
 
 async function currentBranchName(cwd) {
-  return (await git(cwd, "rev-parse", "--abbrev-ref", "HEAD")).trim();
+  return (await git(cwd, "branch", "--show-current")).trim() || "HEAD";
 }
 
 async function generatePullRequestDraftOrFallback(cwd, params, options, baseBranch, branch) {
