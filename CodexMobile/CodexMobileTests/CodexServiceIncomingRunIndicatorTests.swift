@@ -1166,6 +1166,122 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         XCTAssertEqual(service.threadRunBadgeState(for: threadID), .ready)
     }
 
+    func testRepeatedCompletionDoesNotRestoreViewedReadyBadge() {
+        for turnID in ["turn-completed", "ipc-turn-0"] {
+            for completesWhileViewed in [false, true] {
+                let service = makeService()
+                let threadID = "thread-\(UUID().uuidString)"
+                service.threads = [CodexThread(id: threadID, title: "Ready test")]
+                service.activeThreadId = completesWhileViewed ? threadID : nil
+                sendTurnStarted(service: service, threadID: threadID, turnID: turnID)
+                sendTurnCompletedSuccess(service: service, threadID: threadID, turnID: turnID)
+                service.markThreadAsViewed(threadID)
+                service.activeThreadId = nil
+
+                for _ in 0..<3 {
+                    sendTurnCompletedSuccess(service: service, threadID: threadID, turnID: turnID)
+                    XCTAssertNil(service.threadRunBadgeState(for: threadID))
+                    XCTAssertNil(service.threadCompletionBanner)
+                }
+
+                sendTurnStarted(service: service, threadID: threadID, turnID: "turn-next")
+                sendTurnCompletedSuccess(service: service, threadID: threadID, turnID: "turn-next")
+                XCTAssertEqual(service.threadRunBadgeState(for: threadID), .ready)
+                XCTAssertEqual(service.threadCompletionBanner?.threadId, threadID)
+            }
+        }
+    }
+
+    func testHistoricalCompletionClosesRunWithoutUnreadOutcome() {
+        for marker in ["remodexReplayedEvent", "remodexRolloutBootstrapReplay", "remodexRolloutTerminalCatchUp"] {
+            for status in ["completed", "failed"] {
+                let service = makeService()
+                let threadID = "thread-\(UUID().uuidString)"
+                let turnID = "turn-\(UUID().uuidString)"
+                service.threads = [CodexThread(id: threadID, title: "History test")]
+                sendTurnStarted(service: service, threadID: threadID, turnID: turnID)
+                service.activeThreadId = threadID
+                service.markThreadAsViewed(threadID)
+                service.activeThreadId = nil
+
+                service.handleNotification(method: "turn/completed", params: .object([
+                    "threadId": .string(threadID),
+                    "turn": .object(["id": .string(turnID), "status": .string(status)]),
+                    marker: .bool(true),
+                ]))
+
+                XCTAssertFalse(service.threadHasActiveOrRunningTurn(threadID))
+                XCTAssertEqual(service.turnTerminalState(for: turnID, threadId: threadID), status == "failed" ? .failed : .completed)
+                XCTAssertNil(service.threadRunBadgeState(for: threadID))
+                XCTAssertNil(service.threadCompletionBanner)
+            }
+        }
+    }
+
+    func testHistoryMergeDoesNotSuppressFirstLiveCompletion() {
+        for turnID in ["turn-live", "ipc-turn-0"] {
+            for startsWithoutID in [false, true] {
+                let service = makeService()
+                let threadID = "thread-\(UUID().uuidString)"
+                service.threads = [CodexThread(id: threadID, title: "Live test")]
+                if startsWithoutID {
+                    service.handleNotification(method: "turn/started", params: .object(["threadId": .string(threadID)]))
+                } else {
+                    sendTurnStarted(service: service, threadID: threadID, turnID: turnID)
+                }
+                service.mergeHistoryTurnTerminalStates(threadId: threadID, terminalStatesByTurnID: [turnID: .completed])
+                XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+
+                sendTurnCompletedSuccess(service: service, threadID: threadID, turnID: turnID)
+
+                XCTAssertEqual(service.threadRunBadgeState(for: threadID), .ready)
+                XCTAssertEqual(service.threadCompletionBanner?.threadId, threadID)
+            }
+        }
+    }
+
+    func testRepeatedCompletionDoesNotCloseNewIDLessRun() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let completedTurnID = "turn-completed"
+        let params: JSONValue = .object(["threadId": .string(threadID)])
+        service.threads = [CodexThread(id: threadID, title: "ID-less test")]
+        sendTurnStarted(service: service, threadID: threadID, turnID: completedTurnID)
+        sendTurnCompletedSuccess(service: service, threadID: threadID, turnID: completedTurnID)
+        service.markThreadAsViewed(threadID)
+        service.handleNotification(method: "turn/started", params: params)
+        let provisionalTurnID = service.provisionalIDLessTurnIDByThread[threadID]
+        XCTAssertNotNil(provisionalTurnID)
+
+        sendTurnCompletedSuccess(service: service, threadID: threadID, turnID: completedTurnID)
+
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .running)
+        XCTAssertEqual(service.provisionalIDLessTurnIDByThread[threadID], provisionalTurnID)
+        XCTAssertNil(service.threadCompletionBanner)
+        service.handleNotification(method: "turn/completed", params: params)
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .ready)
+    }
+
+    func testIDLessCompletionDoesNotRestoreViewedReadyBadge() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let params: JSONValue = .object(["threadId": .string(threadID)])
+        service.threads = [CodexThread(id: threadID, title: "ID-less test")]
+        service.handleNotification(method: "turn/started", params: params)
+        service.handleNotification(method: "turn/completed", params: params)
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .ready)
+        service.markThreadAsViewed(threadID)
+        service.activeThreadId = nil
+
+        service.handleNotification(method: "turn/completed", params: params)
+        XCTAssertNil(service.threadRunBadgeState(for: threadID))
+        XCTAssertNil(service.threadCompletionBanner)
+
+        service.handleNotification(method: "turn/started", params: params)
+        service.handleNotification(method: "turn/completed", params: params)
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .ready)
+    }
+
     func testStoppedCompletionRecordsStoppedTerminalStateWithoutReadyBadge() {
         let service = makeService()
         let threadID = "thread-\(UUID().uuidString)"

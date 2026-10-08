@@ -843,6 +843,19 @@ extension CodexService {
         let isBackgroundDiscoveryTurn = isBackgroundDiscoveryBridgeEvent(paramsObject)
 
         if let threadId = resolveThreadID(from: paramsObject, turnIdHint: completedTurnID) {
+            let completionReceipts = defaults.dictionary(
+                forKey: macScopedDefaultsKey(Self.handledRunCompletionsDefaultsKey)
+            ) as? [String: Double] ?? [:]
+            let wasAlreadyHandled = completedTurnID.map { turnID in
+                completionReceipts["\(threadId)|\(turnID)"] != nil
+            } ?? false
+            // A duplicate from A must not promote or finish a newer ID-less run B.
+            if wasAlreadyHandled,
+               provisionalIDLessTurnIDByThread[threadId] != nil,
+               completedTurnID != activeTurnIdByThread[threadId],
+               turnTerminalState(for: completedTurnID, threadId: threadId) != nil {
+                return
+            }
             if turnFailureMessage != nil,
                reconcileRepeatedStreamFailure(threadId: threadId, turnId: completedTurnID) { return }
             let notificationTurnID = trackedCompletionNotificationTurnID(
@@ -873,6 +886,14 @@ extension CodexService {
                 from: paramsObject,
                 turnFailureMessage: turnFailureMessage
             )
+            // History and duplicate terminals must not restore a viewed outcome.
+            // A tracked live run can already have terminal state from a racing history read.
+            let shouldMarkOutcomeAsUnread = !isHistoricalCompletionEvent(paramsObject)
+                && !wasAlreadyHandled
+                && (threadHasActiveOrRunningTurn(threadId)
+                    || (resolvedTurnID == nil
+                        ? latestTurnTerminalStateByThread[threadId] == nil
+                        : turnTerminalState(for: resolvedTurnID, threadId: threadId) == nil))
             if completesCurrentThreadRun, let turnFailureMessage {
                 recordRecoverableStreamFailure(
                     threadId: threadId, turnId: resolvedTurnID, message: turnFailureMessage,
@@ -902,13 +923,17 @@ extension CodexService {
                         )
                     }
                 }
-                markReadyIfUnread(threadId: threadId)
+                if shouldMarkOutcomeAsUnread {
+                    markReadyIfUnread(threadId: threadId)
+                }
                 if let notificationTurnID, isSuccessfulCompletionNotification(paramsObject) {
                     notifyRunCompletionIfNeeded(threadId: threadId, turnId: notificationTurnID, result: .completed)
                 }
             } else if completesCurrentThreadRun, terminalState == .failed {
                 discardTurnStartWorkspaceCheckpointCopyIfNeeded(turnId: resolvedTurnID)
-                markFailedIfUnread(threadId: threadId)
+                if shouldMarkOutcomeAsUnread {
+                    markFailedIfUnread(threadId: threadId)
+                }
                 if let notificationTurnID {
                     notifyRunCompletionIfNeeded(threadId: threadId, turnId: notificationTurnID, result: .failed)
                 }
