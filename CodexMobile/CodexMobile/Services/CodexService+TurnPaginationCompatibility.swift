@@ -51,6 +51,7 @@ extension CodexService {
                 || message.contains("not implemented")
             let mentionsTurnList = message.contains("thread/turns/list")
                 || message.contains("turns/list")
+                || message.contains("list_turns")
                 || message.contains("turn pagination")
             let mentionsUnsupportedPagination = message.contains("unsupported")
                 || message.contains("not supported")

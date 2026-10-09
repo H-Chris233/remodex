@@ -727,6 +727,137 @@ final class CodexServiceCatchupRecoveryTests: XCTestCase {
         service.canonicalHistoryReconcileRetryTaskByThreadID[threadID]?.cancel()
     }
 
+    func testTurnPaginationCompatibilityRecognizesLegacyListTurnsName() {
+        let service = makeService()
+        for (code, message) in [
+            (-32601, "list_turns is not supported yet"),
+            (-32601, "LIST_TURNS is not supported yet"),
+            (-32601, "Method not found: thread/turns/list"),
+            (-32601, "Method not found: turns/list"),
+            (-32602, "Unknown field: excludeTurns"),
+            (-32602, "Unknown field: exclude_turns"),
+        ] {
+            XCTAssertTrue(service.shouldDisableTurnPagination(
+                CodexServiceError.rpcError(RPCError(code: code, message: message))
+            ), message)
+        }
+        for error in [
+            CodexServiceError.rpcError(RPCError(code: -32601, message: "Method not found: thread/settings/update")),
+            CodexServiceError.rpcError(RPCError(code: -32000, message: "Permission denied for list_turns")),
+            CodexServiceError.disconnected,
+        ] {
+            XCTAssertFalse(service.shouldDisableTurnPagination(error), error.localizedDescription)
+        }
+    }
+
+    func testRuntimeSettingsResumeFallsBackWhenLegacyListTurnsIsUnsupported() async throws {
+        let service = makeService()
+        let threadID = "thread-settings-legacy-pagination"
+        let pending: RPCObject = ["model": .string("test-model"), "effort": .string("high")]
+        service.isConnected = true
+        service.isInitialized = true
+        service.supportsRuntimeSettingsSync = true
+        service.supportsTurnPagination = true
+        service.selectedAccessMode = .onRequest
+        service.upsertThread(CodexThread(id: threadID, title: "Settings", cwd: "/tmp/project"))
+        var override = CodexThreadRuntimeOverride(modelId: "test-model", overridesModel: true)
+        override.pendingRuntimeSettings = pending
+        service.applyThreadRuntimeOverride(override, to: threadID)
+
+        var methods: [String] = []
+        var resumes: [RPCObject] = []
+        service.requestTransportOverride = { method, params in
+            methods.append(method)
+            let object = try XCTUnwrap(params?.objectValue)
+            switch method {
+            case "thread/resume":
+                resumes.append(object)
+                if resumes.count == 1 {
+                    XCTAssertEqual(object["excludeTurns"], .bool(true))
+                    throw CodexServiceError.rpcError(RPCError(code: -32601, message: "list_turns is not supported yet"))
+                }
+                XCTAssertNil(object["excludeTurns"])
+                return RPCMessage(id: nil, result: .object([:]))
+            case "thread/settings/update":
+                XCTAssertTrue(service.resumedThreadIDs.contains(threadID))
+                XCTAssertEqual(object, pending.merging(["threadId": .string(threadID)]) { _, value in value })
+                await Task.yield()
+                XCTAssertEqual(service.threadRuntimeOverride(for: threadID)?.pendingRuntimeSettings, pending)
+                return RPCMessage(id: nil, result: .object([:]))
+            default:
+                XCTFail("Unexpected request: \(method)")
+                throw CodexServiceError.invalidInput("Unexpected request")
+            }
+        }
+
+        try await service.waitForRuntimeSettingsUpdate(threadId: threadID)
+
+        XCTAssertEqual(methods, ["thread/resume", "thread/resume", "thread/settings/update"])
+        let firstResume = try XCTUnwrap(resumes.first)
+        XCTAssertEqual(firstResume["model"], .string("test-model"))
+        XCTAssertEqual(firstResume["cwd"], .string("/tmp/project"))
+        XCTAssertEqual(firstResume["approvalPolicy"], .string("on-request"))
+        XCTAssertEqual(firstResume["sandbox"], .string("workspace-write"))
+        var legacyResume = firstResume
+        legacyResume.removeValue(forKey: "excludeTurns")
+        XCTAssertEqual(resumes.last, legacyResume)
+        XCTAssertFalse(service.supportsTurnPagination)
+        XCTAssertTrue(service.threadRuntimeOverride(for: threadID)?.pendingRuntimeSettings.isEmpty == true)
+        XCTAssertNil(service.runtimeSettingsUpdateErrors[threadID])
+        XCTAssertNil(service.lastErrorMessage)
+    }
+
+    func testRuntimeSettingsFallbackStillBlocksSendingWhenResumeOrSettingsFails() async throws {
+        for failingMethod in ["thread/resume", "thread/settings/update"] {
+            let service = makeService()
+            let threadID = "thread-failed-legacy-pagination"
+            let pending: RPCObject = ["model": .string("test-model")]
+            service.isConnected = true
+            service.isInitialized = true
+            service.supportsRuntimeSettingsSync = true
+            service.supportsTurnPagination = true
+            service.selectedAccessMode = .onRequest
+            service.activeThreadId = threadID
+            service.upsertThread(CodexThread(id: threadID, title: "Settings"))
+            var override = CodexThreadRuntimeOverride(modelId: "test-model", overridesModel: true)
+            override.pendingRuntimeSettings = pending
+            service.applyThreadRuntimeOverride(override, to: threadID)
+
+            var methods: [String] = []
+            service.requestTransportOverride = { method, params in
+                methods.append(method)
+                if method == "thread/resume", methods.count == 1 {
+                    XCTAssertEqual(params?.objectValue?["excludeTurns"], .bool(true))
+                    throw CodexServiceError.rpcError(RPCError(code: -32601, message: "list_turns is not supported yet"))
+                }
+                if method == failingMethod {
+                    // Even the same compatibility error must remain fatal after the one resume retry.
+                    throw CodexServiceError.rpcError(RPCError(code: -32601, message: "list_turns is not supported yet"))
+                }
+                XCTAssertEqual(method, "thread/resume")
+                XCTAssertNil(params?.objectValue?["excludeTurns"])
+                return RPCMessage(id: nil, result: .object([:]))
+            }
+
+            do {
+                try await service.waitForRuntimeSettingsUpdate(threadId: threadID)
+                XCTFail("Failed \(failingMethod) must block sending")
+            } catch {
+                XCTAssertTrue(error.localizedDescription.contains("list_turns is not supported yet"))
+            }
+
+            let expected = failingMethod == "thread/resume"
+                ? ["thread/resume", "thread/resume"]
+                : ["thread/resume", "thread/resume", "thread/settings/update"]
+            XCTAssertEqual(methods, expected)
+            XCTAssertFalse(service.supportsTurnPagination)
+            XCTAssertEqual(service.threadRuntimeOverride(for: threadID)?.pendingRuntimeSettings, pending)
+            XCTAssertNotNil(service.runtimeSettingsUpdateErrors[threadID])
+            XCTAssertEqual(service.lastErrorMessage, service.runtimeSettingsUpdateErrors[threadID])
+            XCTAssertNil(service.runtimeSettingsUpdateTasks[threadID])
+        }
+    }
+
     func testHistoryOpenFallsBackToLegacyThreadReadWhenTurnPaginationIsUnsupported() async throws {
         let service = makeService()
         let threadID = "thread-legacy-pagination"
