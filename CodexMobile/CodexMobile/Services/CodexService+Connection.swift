@@ -680,6 +680,7 @@ extension CodexService {
 
     // Clears volatile runtime state on server switch.
     func resetThreadRuntimeStateForServerSwitch() {
+        viewedProjectedTurnIDsByThread.removeAll()
         resetRuntimeSettingsSyncState()
         activeThreadId = nil
         activeTurnId = nil

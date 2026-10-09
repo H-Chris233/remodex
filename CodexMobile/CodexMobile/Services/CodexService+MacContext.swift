@@ -287,6 +287,7 @@ extension CodexService {
             clearAllRunningState()
             readyThreadIDs.removeAll()
             failedThreadIDs.removeAll()
+            viewedProjectedTurnIDsByThread.removeAll()
             removeAllThreadTimelineState()
             assistantRevertStateCacheByThread.removeAll()
             assistantRevertStateRevision = 0

@@ -790,6 +790,9 @@ extension CodexService {
                     startsNewRun: !wasThreadRunning || startsDistinctIDLessTurn
                 )
             }
+            if !isHistoricalCompletionEvent(paramsObject), let turnID {
+                viewedProjectedTurnIDsByThread[threadId]?.remove(turnID)
+            }
             markThreadAsRunning(threadId)
             if isDesktopMirroredTurn {
                 markDesktopMirroredRunning(for: threadId)
@@ -886,10 +889,11 @@ extension CodexService {
                 from: paramsObject,
                 turnFailureMessage: turnFailureMessage
             )
-            // History and duplicate terminals must not restore a viewed outcome.
-            // A tracked live run can already have terminal state from a racing history read.
-            let shouldMarkOutcomeAsUnread = !isHistoricalCompletionEvent(paramsObject)
-                && !wasAlreadyHandled
+            // Catch-up can be the first delivery of a new completion. Admission
+            // follows viewed/runtime state, not transport flags or alert receipts.
+            let shouldMarkOutcomeAsUnread = (resolvedTurnID.map { turnID in
+                viewedProjectedTurnIDsByThread[threadId]?.contains(turnID) != true
+            } ?? true)
                 && (threadHasActiveOrRunningTurn(threadId)
                     || (resolvedTurnID == nil
                         ? latestTurnTerminalStateByThread[threadId] == nil

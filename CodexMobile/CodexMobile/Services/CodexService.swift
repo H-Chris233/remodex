@@ -483,6 +483,8 @@ final class CodexService {
     var terminalStateByTurnID: [String: CodexTurnTerminalState] = [:]
     // Projected `ipc-turn-N` ids are only unique inside one thread/source epoch.
     @ObservationIgnored var projectedTerminalStateByThreadID: [String: [String: CodexTurnTerminalState]] = [:]
+    // Viewing a projected outcome must survive a mirror's runtime-cache rebuild.
+    @ObservationIgnored var viewedProjectedTurnIDsByThread: [String: Set<String>] = [:]
     // Ordered pending runtime approvals keyed by request id so concurrent prompts do not overwrite each other.
     var pendingApprovals: [CodexApprovalRequest] = []
     @ObservationIgnored var autoApprovalRetryReviewIDsInFlight: Set<String> = []

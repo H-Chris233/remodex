@@ -1192,7 +1192,7 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
         }
     }
 
-    func testHistoricalCompletionClosesRunWithoutUnreadOutcome() {
+    func testRecoveredCompletionMarksRunUnreadAfterViewingItWhileRunning() {
         for marker in ["remodexReplayedEvent", "remodexRolloutBootstrapReplay", "remodexRolloutTerminalCatchUp"] {
             for status in ["completed", "failed"] {
                 let service = makeService()
@@ -1212,10 +1212,44 @@ final class CodexServiceIncomingRunIndicatorTests: XCTestCase {
 
                 XCTAssertFalse(service.threadHasActiveOrRunningTurn(threadID))
                 XCTAssertEqual(service.turnTerminalState(for: turnID, threadId: threadID), status == "failed" ? .failed : .completed)
+                XCTAssertEqual(service.threadRunBadgeState(for: threadID), status == "failed" ? .failed : .ready)
+                if status == "completed" {
+                    XCTAssertEqual(service.threadCompletionBanner?.threadId, threadID)
+                }
+
+                service.markThreadAsViewed(threadID)
+                service.handleNotification(method: "turn/completed", params: .object([
+                    "threadId": .string(threadID),
+                    "turn": .object(["id": .string(turnID), "status": .string(status)]),
+                    marker: .bool(true),
+                ]))
                 XCTAssertNil(service.threadRunBadgeState(for: threadID))
                 XCTAssertNil(service.threadCompletionBanner)
             }
         }
+    }
+
+    func testViewedProjectedCompletionSurvivesRuntimeSourceReplacement() {
+        let service = makeService()
+        let threadID = "thread-\(UUID().uuidString)"
+        let turnID = "ipc-turn-0"
+        service.threads = [CodexThread(id: threadID, title: "Viewed mirror")]
+        sendTurnStarted(service: service, threadID: threadID, turnID: turnID)
+        sendTurnCompletedSuccess(service: service, threadID: threadID, turnID: turnID)
+        service.markThreadAsViewed(threadID)
+        service.handleNotification(method: "thread/replaced", params: .object([
+            "threadId": .string(threadID),
+            "remodexDesktopMirror": .bool(true),
+        ]))
+        XCTAssertNil(service.turnTerminalState(for: turnID, threadId: threadID))
+
+        sendTurnCompletedSuccess(service: service, threadID: threadID, turnID: turnID)
+
+        XCTAssertNil(service.threadRunBadgeState(for: threadID))
+        XCTAssertNil(service.threadCompletionBanner)
+        sendTurnStarted(service: service, threadID: threadID, turnID: "ipc-turn-1")
+        sendTurnCompletedSuccess(service: service, threadID: threadID, turnID: "ipc-turn-1")
+        XCTAssertEqual(service.threadRunBadgeState(for: threadID), .ready)
     }
 
     func testHistoryMergeDoesNotSuppressFirstLiveCompletion() {

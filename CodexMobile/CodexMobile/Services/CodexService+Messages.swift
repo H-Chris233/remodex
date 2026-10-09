@@ -843,6 +843,9 @@ extension CodexService {
 
     // Clears "ready/failed" badges when the user has opened a thread.
     func markThreadAsViewed(_ threadId: String) {
+        if let terminalStates = projectedTerminalStateByThreadID[threadId] {
+            viewedProjectedTurnIDsByThread[threadId, default: []].formUnion(terminalStates.keys)
+        }
         clearRunningThreadWatch(threadId)
         clearOutcomeBadge(for: threadId)
         recentRunCompletionEventsByThread.removeValue(forKey: threadId)
@@ -896,6 +899,7 @@ extension CodexService {
         let wasAlreadyReady = readyThreadIDs.contains(threadId)
         clearOutcomeBadge(for: threadId)
         guard activeThreadId != threadId else {
+            markThreadAsViewed(threadId)
             return
         }
         readyThreadIDs.insert(threadId)
@@ -910,6 +914,7 @@ extension CodexService {
         clearRunningThreadWatch(threadId)
         clearOutcomeBadge(for: threadId)
         guard activeThreadId != threadId else {
+            markThreadAsViewed(threadId)
             return
         }
         failedThreadIDs.insert(threadId)

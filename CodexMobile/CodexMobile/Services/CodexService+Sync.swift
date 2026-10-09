@@ -642,6 +642,7 @@ extension CodexService {
         threadIdByTurnID = threadIdByTurnID.filter { $0.value != threadId }
 
         clearOutcomeBadge(for: threadId)
+        viewedProjectedTurnIDsByThread.removeValue(forKey: threadId)
         latestTurnTerminalStateByThread.removeValue(forKey: threadId)
         goalByThreadID.removeValue(forKey: threadId)
         asyncUserInputErrorsByThread.removeValue(forKey: threadId)
@@ -1040,27 +1041,34 @@ extension CodexService {
         pruneRunningThreadWatchlist()
 
         let availableThreadIDs = Set(threads.map(\.id))
-        let candidateThreadIDs = runningThreadWatchByID.values
+        let candidateWatches = runningThreadWatchByID.values
             .sorted { lhs, rhs in
                 lhs.expiresAt < rhs.expiresAt
             }
-            .map(\.threadId)
-            .filter { threadId in
-                threadId != activeThreadId
+            .filter { watch in
+                let threadId = watch.threadId
+                return threadId != activeThreadId
                     && availableThreadIDs.contains(threadId)
                     && runningThreadIDs.contains(threadId)
             }
             .prefix(limit)
 
-        for threadId in candidateThreadIDs {
+        for watch in candidateWatches {
+            let threadId = watch.threadId
+            guard runningThreadWatchByID[threadId] == watch else { continue }
             let wasRunning = threadHasActiveOrRunningTurn(threadId)
             let didRefresh = await refreshInFlightTurnState(threadId: threadId)
 
-            guard !didRefresh || !wasRunning || !threadHasActiveOrRunningTurn(threadId) else {
+            // Opening the chat cancels this watch; a suspended poll must not
+            // restore its badge after the user has already opened and left it.
+            guard runningThreadWatchByID[threadId] == watch,
+                  didRefresh, wasRunning, !threadHasActiveOrRunningTurn(threadId) else {
                 continue
             }
 
             await syncThreadHistory(threadId: threadId, force: true)
+            guard runningThreadWatchByID[threadId] == watch,
+                  !threadHasActiveOrRunningTurn(threadId) else { continue }
             if !failedThreadIDs.contains(threadId) {
                 markReadyIfUnread(threadId: threadId)
             }
