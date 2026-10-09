@@ -348,6 +348,7 @@ func timelineSelectableActionText(_ text: String) -> String? {
 
 struct MessageRow: View, Equatable {
     @Environment(CodexService.self) private var codex
+    @Environment(\.workspaceFileOpenAction) private var workspaceFileOpenAction
     let message: CodexMessage
     let isRetryAvailable: Bool
     let onRetryUserMessage: (String) -> Void
@@ -492,6 +493,19 @@ struct MessageRow: View, Equatable {
         // No .clipped() here: it cut the selection handle grabbers at the row edges.
         // The timeline container already clips the rows section at viewport width.
         .frame(maxWidth: .infinity, alignment: .leading)
+        .environment(\.openURL, OpenURLAction { url in
+            guard let action = workspaceFileOpenAction,
+                  let path = WorkspaceFileLinkResolver.localPath(from: url) else {
+                return .systemAction
+            }
+            action(WorkspaceFilePreviewRequest(
+                path: path,
+                currentWorkingDirectory: currentWorkingDirectory,
+                threadId: message.threadId,
+                turnId: message.turnId
+            ))
+            return .handled
+        })
         .onAppear {
             synchronizeAssistantDisplayText(immediate: true)
         }
@@ -674,7 +688,9 @@ struct MessageRow: View, Equatable {
                             if reference.canPreview(currentWorkingDirectory: currentWorkingDirectory) {
                                 AssistantMarkdownImagePreviewButton(
                                     reference: reference,
-                                    currentWorkingDirectory: currentWorkingDirectory
+                                    currentWorkingDirectory: currentWorkingDirectory,
+                                    threadId: message.threadId,
+                                    turnId: message.turnId
                                 )
                             }
                         }
@@ -701,7 +717,9 @@ struct MessageRow: View, Equatable {
                         ForEach(trailingAssistantImageReferences) { reference in
                             AssistantMarkdownImagePreviewButton(
                                 reference: reference,
-                                currentWorkingDirectory: currentWorkingDirectory
+                                currentWorkingDirectory: currentWorkingDirectory,
+                                threadId: message.threadId,
+                                turnId: message.turnId
                             )
                         }
                     }

@@ -65,6 +65,25 @@ final class RemodexTextKitMarkdownRenderingRegressionTests: XCTestCase {
         XCTAssertNil(WorkspaceFileLinkResolver.localPath(from: schemeLessWebFileURL))
     }
 
+    func testWindowsDocumentLinksKeepTheirCompletePathDuringRendering() throws {
+        let path = #"E:\Documents\作品 #1%20 (最终).docx"#
+        let rendered = MarkdownTextFormatter.renderableText(
+            from: "[作品介绍](<\(path)>)",
+            profile: .assistantProse,
+            usesCache: false
+        )
+        let link = try XCTUnwrap(TurnMessageRegexCache.parseMarkdownLink(from: rendered))
+        let url = try XCTUnwrap(URL(string: link.destination))
+
+        XCTAssertEqual(WorkspaceFileLinkResolver.localPath(from: url), path)
+        XCTAssertEqual(WorkspaceFileLinkResolver.displayFileName(for: path), "作品 #1%20 (最终).docx")
+        XCTAssertEqual(WorkspaceFileLinkResolver.preferredPreviewKind(for: path), .download)
+        XCTAssertEqual(
+            WorkspaceFileLinkResolver.localPath(from: try XCTUnwrap(URL(string: "file:///C:/Reports/Review%20%232.docx#L7"))),
+            "C:/Reports/Review #2.docx"
+        )
+    }
+
     func testWorkspaceSVGPreviewHTMLBlocksExternalReferences() {
         let svg = """
         <svg xmlns="http://www.w3.org/2000/svg">

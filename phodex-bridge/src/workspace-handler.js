@@ -125,9 +125,9 @@ async function workspaceReadFile(params) {
     throw workspaceError("missing_file_path", "The request must include a file path.");
   }
 
-  const cwd = await resolveWorkspaceCwd(params);
-  const realWorkspaceRoot = await resolveReadableWorkspaceRoot(cwd);
-  const realFilePath = await resolveWorkspaceTextFilePath(cwd, requestedPath, realWorkspaceRoot);
+  const { realWorkspaceRoot, realFilePath } = await resolveWorkspaceFileTarget(
+    await resolveWorkspaceCwd(params), requestedPath
+  );
   if (!realFilePath) {
     throw workspaceError("file_not_found", "The file no longer exists on this Mac.");
   }
@@ -342,6 +342,14 @@ async function resolveReadableWorkspaceRoot(cwd) {
 
 async function resolveImageWorkspaceRoot(cwd) {
   return resolveReadableWorkspaceRoot(cwd);
+}
+
+// Shared by text previews and downloads; callers decide whether a cited external file is allowed.
+async function resolveWorkspaceFileTarget(cwd, requestedPath) {
+  await resolveWorkspaceCwd({ cwd });
+  const realWorkspaceRoot = await resolveReadableWorkspaceRoot(cwd);
+  const realFilePath = await resolveWorkspaceTextFilePath(cwd, requestedPath, realWorkspaceRoot);
+  return { realWorkspaceRoot, realFilePath };
 }
 
 // Handles assistant links that only include a filename by finding one unique workspace match.
@@ -1356,7 +1364,7 @@ async function realpathOrNull(candidatePath) {
 
 function isPathInside(candidatePath, rootPath) {
   const relative = path.relative(rootPath, candidatePath);
-  return relative === "" || (relative && !relative.startsWith("..") && !path.isAbsolute(relative));
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
 function workspaceError(errorCode, userMessage) {
@@ -1379,4 +1387,4 @@ function git(cwd, ...args) {
     });
 }
 
-module.exports = { handleWorkspaceMethod, handleWorkspaceRequest };
+module.exports = { handleWorkspaceMethod, handleWorkspaceRequest, resolveWorkspaceFileTarget, isPathInside };

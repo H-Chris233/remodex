@@ -160,6 +160,11 @@ struct ContentView: View {
                 )
                 codex.activeThreadId = thread?.id
                 if let thread {
+                    if shouldPresentSidebarAsNavigation,
+                       case .thread(let displayedThreadID) = navigationPath.last,
+                       displayedThreadID != thread.id {
+                        navigationPath = [.thread(id: thread.id)]
+                    }
                     clearDisplayIslandOutcome(for: thread.id)
                     syncDisplayIsland()
                 }

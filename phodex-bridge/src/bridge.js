@@ -36,6 +36,7 @@ const { readDaemonConfig, writeDaemonConfig } = require("./daemon-state");
 const { handleGitRequest } = require("./git-handler");
 const { handleThreadContextRequest } = require("./thread-context-handler");
 const { handleWorkspaceRequest } = require("./workspace-handler");
+const { createWorkspaceFileDownloadService, createFileDownloadThreadReader, DOWNLOAD_METHODS } = require("./workspace-file-download");
 const { handleProjectRequest } = require("./project-handler");
 const { handlePetRequest } = require("./pet-handler");
 const { createNotificationsHandler } = require("./notifications-handler");
@@ -957,6 +958,21 @@ function startBridge({
       sendApplicationResponse(JSON.stringify(message), message);
     },
   });
+  const fileDownloads = createWorkspaceFileDownloadService({
+    readThreadContext: createFileDownloadThreadReader({
+      sendCodexRequest,
+      openCodeRuntime,
+      readRollout(threadId) {
+        // Keep artifact authorization bounded; older unavailable citations fail closed.
+        const rolloutPath = findRecentRolloutFileForContextRead(resolveSessionsRoot(), { threadId });
+        if (!rolloutPath) return null;
+        const metadata = readSessionJsonlMetadataFromFile(rolloutPath);
+        if (metadata.threadId !== threadId) return null;
+        const recent = readRecentSessionJsonlTurns(rolloutPath, { threadId });
+        return { cwd: metadata.cwd, turns: recent?.turns || [] };
+      },
+    }),
+  });
   const voiceHandler = createVoiceHandler({
     sendCodexRequest,
     logPrefix: "[remodex]",
@@ -1032,6 +1048,9 @@ function startBridge({
     bridgeStatusPublisher.stopHeartbeat();
     stopContextUsageWatcher();
     activityStore.dispose();
+    fileDownloads.dispose().catch((error) => {
+      console.warn(`[remodex] File download cleanup failed: ${error?.message || "unknown error"}`);
+    });
     rolloutLiveMirror?.stopAll();
     desktopIpcActionFollower?.stopAll();
     desktopIpcLiveOwner?.stopAll();
@@ -1313,6 +1332,9 @@ function startBridge({
       Promise.resolve().then(() => openCodeRuntime.handleClientResponse(parsedMessage)).catch((error) => {
         console.warn(`[remodex] OpenCode response failed: ${error?.message || "unknown error"}`);
       });
+      return;
+    }
+    if (fileDownloads.handleRequest(rawMessage, sendApplicationResponse, parsedMessage)) {
       return;
     }
     if (isOpenCodeRequest(parsedMessage, openCodeRuntime)) {
@@ -5336,6 +5358,9 @@ function shouldSuppressRolloutMirrorForThread(
 function isOpenCodeRequest(message, runtime) {
   const method = readString(message?.method);
   if (!method) {
+    return false;
+  }
+  if (DOWNLOAD_METHODS.has(method)) {
     return false;
   }
   if (method === "remodex/opencode/models") {

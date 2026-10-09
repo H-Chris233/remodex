@@ -226,9 +226,13 @@ struct TurnView: View {
             }
             workspaceFilePreviewRequest = WorkspaceFilePreviewRequest(
                 path: path,
-                currentWorkingDirectory: gitWorkingDirectory
+                currentWorkingDirectory: gitWorkingDirectory,
+                threadId: thread.id
             )
             return .handled
+        })
+        .environment(\.workspaceFileOpenAction, { request in
+            workspaceFilePreviewRequest = request
         })
         .environment(\.inlineCommitAndPushAction, showsGitControls ? {
             viewModel.inlineCommitAndPush(

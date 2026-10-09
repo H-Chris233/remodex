@@ -41,105 +41,18 @@ struct AssistantWorkspaceImagePreviewRequest: Identifiable {
 struct WorkspaceFilePreviewRequest: Identifiable, Equatable {
     let path: String
     let currentWorkingDirectory: String?
+    let threadId: String?
+    let turnId: String?
+
+    init(path: String, currentWorkingDirectory: String?, threadId: String? = nil, turnId: String? = nil) {
+        self.path = path
+        self.currentWorkingDirectory = currentWorkingDirectory
+        self.threadId = threadId
+        self.turnId = turnId
+    }
 
     var id: String {
-        "\(currentWorkingDirectory ?? "")|\(path)"
-    }
-}
-
-fileprivate enum WorkspaceLinkedFilePreviewKind {
-    case imageFirst
-    case textFirst
-}
-
-enum WorkspaceFileLinkResolver {
-    private static let textFileExtensions: Set<String> = [
-        "bash", "c", "cc", "cjs", "cpp", "cs", "css", "go", "h", "html", "java",
-        "js", "json", "jsx", "kt", "m", "md", "mjs", "mm", "py", "rb", "rs",
-        "scss", "sh", "sql", "swift", "toml", "ts", "tsx", "txt", "xml", "yaml",
-        "yml", "zsh"
-    ]
-    private static let imageFileExtensions: Set<String> = [
-        "gif", "heic", "heif", "jpeg", "jpg", "png", "svg", "webp"
-    ]
-    private static let extensionlessFileNames: Set<String> = [
-        "dockerfile", "gemfile", "makefile", "podfile"
-    ]
-
-    // Converts markdown link destinations into local paths the paired Mac can read.
-    static func localPath(from url: URL) -> String? {
-        if url.isFileURL {
-            return normalizedPath(url.path)
-        }
-
-        guard url.scheme == nil else {
-            return nil
-        }
-
-        let rawValue = url.absoluteString.removingPercentEncoding ?? url.absoluteString
-        return normalizedPath(rawValue)
-    }
-
-    fileprivate static func preferredPreviewKind(for path: String) -> WorkspaceLinkedFilePreviewKind {
-        let fileExtension = (path as NSString).pathExtension.lowercased()
-        return textFileExtensions.contains(fileExtension) ? .textFirst : .imageFirst
-    }
-
-    private static func normalizedPath(_ value: String) -> String? {
-        let trimmed = stripLineSuffix(from: stripFragmentAndQuery(from: value))
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty,
-              !trimmed.hasPrefix("#"),
-              !trimmed.contains("\n"),
-              !trimmed.contains("\r") else {
-            return nil
-        }
-        guard isLocalPathCandidate(trimmed) else {
-            return nil
-        }
-        return trimmed
-    }
-
-    private static func isLocalPathCandidate(_ value: String) -> Bool {
-        if value.hasPrefix("/") || value.hasPrefix("./") || value.hasPrefix("../") {
-            return true
-        }
-        guard !looksLikeSchemeLessWebURL(value) else {
-            return false
-        }
-
-        let fileName = (value as NSString).lastPathComponent.lowercased()
-        let fileExtension = (value as NSString).pathExtension.lowercased()
-        return extensionlessFileNames.contains(fileName)
-            || textFileExtensions.contains(fileExtension)
-            || imageFileExtensions.contains(fileExtension)
-    }
-
-    private static func looksLikeSchemeLessWebURL(_ value: String) -> Bool {
-        guard value.contains("/") else {
-            return false
-        }
-        guard let firstComponent = value.split(separator: "/", maxSplits: 1).first else {
-            return false
-        }
-        return firstComponent.contains(".")
-            && !firstComponent.hasPrefix(".")
-            && !firstComponent.hasSuffix(".")
-    }
-
-    private static func stripFragmentAndQuery(from value: String) -> String {
-        guard let boundary = value.firstIndex(where: { $0 == "#" || $0 == "?" }) else {
-            return value
-        }
-        return String(value[..<boundary])
-    }
-
-    private static func stripLineSuffix(from value: String) -> String {
-        var normalized = value
-        if let range = normalized.range(of: #":\d+(?::\d+)?$"#, options: .regularExpression) {
-            normalized.removeSubrange(range)
-        }
-        return normalized
+        "\(threadId ?? "")|\(turnId ?? "")|\(currentWorkingDirectory ?? "")|\(path)"
     }
 }
 
@@ -197,6 +110,8 @@ private struct WorkspacePreviewRetryButton: View {
 struct AssistantMarkdownImagePreviewButton: View {
     let reference: AssistantMarkdownImageReference
     let currentWorkingDirectory: String?
+    var threadId: String? = nil
+    var turnId: String? = nil
 
     @Environment(CodexService.self) private var codex
     @State private var previewRequest: AssistantWorkspaceImagePreviewRequest?
@@ -223,6 +138,12 @@ struct AssistantMarkdownImagePreviewButton: View {
                 reference: request.reference,
                 currentWorkingDirectory: request.currentWorkingDirectory,
                 initialPayload: request.initialPayload,
+                fileRequest: WorkspaceFilePreviewRequest(
+                    path: request.reference.path,
+                    currentWorkingDirectory: request.currentWorkingDirectory,
+                    threadId: threadId,
+                    turnId: turnId
+                ),
                 onDismiss: { previewRequest = nil }
             )
         }
@@ -356,22 +277,30 @@ struct WorkspaceLinkedFilePreviewScreen: View {
 
     var body: some View {
         Group {
-            switch payload {
-            case .image(let imagePayload):
-                ZoomableImagePreviewScreen(payload: imagePayload, onDismiss: onDismiss)
-            case .svg(let svgPayload):
-                WorkspaceSVGFilePreviewScreen(payload: svgPayload, onDismiss: onDismiss, onReload: {
-                    Task { await loadPreview(force: true) }
-                })
-            case .text(let file):
-                WorkspaceTextFileViewerScreen(file: file, onDismiss: onDismiss, onReload: {
-                    Task { await loadPreview(force: true) }
-                })
-            case nil:
-                loadingOrErrorScreen
+            if case .download = WorkspaceFileLinkResolver.preferredPreviewKind(for: request.path) {
+                WorkspaceFileDownloadScreen(request: request, onDismiss: onDismiss)
+            } else {
+                switch payload {
+                case .image(let imagePayload):
+                    ZoomableImagePreviewScreen(payload: imagePayload, onDismiss: onDismiss)
+                case .svg(let svgPayload):
+                    WorkspaceSVGFilePreviewScreen(payload: svgPayload, onDismiss: onDismiss, onReload: {
+                        Task { await loadPreview(force: true) }
+                    })
+                case .text(let file):
+                    WorkspaceTextFileViewerScreen(file: file, onDismiss: onDismiss, onReload: {
+                        Task { await loadPreview(force: true) }
+                    })
+                case nil:
+                    loadingOrErrorScreen
+                }
             }
         }
+        .environment(\.workspaceFileDownloadRequest, request)
         .task(id: request.id) {
+            if case .download = WorkspaceFileLinkResolver.preferredPreviewKind(for: request.path) {
+                return
+            }
             await loadPreview()
         }
     }
@@ -427,12 +356,15 @@ struct WorkspaceLinkedFilePreviewScreen: View {
             WorkspacePreviewTitlePill(title: fileName)
 
             Spacer(minLength: 0)
+
+            WorkspaceFileDownloadButton()
+                .frame(width: 38, height: 38)
+                .adaptiveGlass(.regular, in: Circle())
         }
     }
 
     private var fileName: String {
-        let basename = (request.path as NSString).lastPathComponent
-        return basename.isEmpty ? "File" : basename
+        WorkspaceFileLinkResolver.displayFileName(for: request.path)
     }
 
     @MainActor
@@ -454,6 +386,8 @@ struct WorkspaceLinkedFilePreviewScreen: View {
             await loadImageThenText(force: force)
         case .textFirst:
             await loadTextThenImage(force: force)
+        case .download:
+            break
         }
     }
 
@@ -588,6 +522,8 @@ private struct WorkspaceTextFileViewerScreen: View {
                     WorkspaceTextFilePreviewToolbarTitle(file: file)
                 }
                 ToolbarItemGroup(placement: .confirmationAction) {
+                    WorkspaceFileDownloadButton()
+
                     Button {
                         onReload()
                     } label: {
@@ -670,6 +606,10 @@ private struct WorkspaceSVGFilePreviewScreen: View {
             WorkspacePreviewChromeButton(systemName: "arrow.clockwise", accessibilityLabel: "Reload SVG preview") {
                 onReload()
             }
+
+            WorkspaceFileDownloadButton()
+                .frame(width: 38, height: 38)
+                .adaptiveGlass(.regular, in: Circle())
         }
     }
 }
@@ -1224,6 +1164,7 @@ struct AssistantWorkspaceImagePreviewScreen: View {
     let reference: AssistantMarkdownImageReference
     let currentWorkingDirectory: String?
     let onDismiss: () -> Void
+    let fileRequest: WorkspaceFilePreviewRequest?
 
     @Environment(CodexService.self) private var codex
     @State private var isLoading = false
@@ -1234,11 +1175,13 @@ struct AssistantWorkspaceImagePreviewScreen: View {
         reference: AssistantMarkdownImageReference,
         currentWorkingDirectory: String?,
         initialPayload: PreviewImagePayload? = nil,
+        fileRequest: WorkspaceFilePreviewRequest? = nil,
         onDismiss: @escaping () -> Void
     ) {
         self.reference = reference
         self.currentWorkingDirectory = currentWorkingDirectory
         self.onDismiss = onDismiss
+        self.fileRequest = fileRequest
         _payload = State(initialValue: initialPayload)
     }
 
@@ -1253,6 +1196,7 @@ struct AssistantWorkspaceImagePreviewScreen: View {
                 loadingOrErrorScreen
             }
         }
+        .environment(\.workspaceFileDownloadRequest, fileRequest)
         .task(id: reference.path) {
             await loadPreview()
         }

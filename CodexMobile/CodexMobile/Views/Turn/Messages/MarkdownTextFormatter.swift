@@ -73,15 +73,16 @@ enum MarkdownTextFormatter {
     }
 
     private static func linkifyInlineFileReferences(in line: String, profile: MarkdownRenderProfile) -> String {
+        let normalizedLine = normalizeExplicitFileLinks(in: line)
         switch profile {
         case .assistantProse, .fileChangeSystem:
             break
         case .userProse:
             // User prose renders mentions as chips upstream; typed paths stay literal text.
-            return line
+            return normalizedLine
         }
 
-        var transformedLine = line
+        var transformedLine = normalizedLine
 
         if let fileLinked = linkifyFileReferenceLine(transformedLine), fileLinked != transformedLine {
             transformedLine = fileLinked
@@ -89,6 +90,27 @@ enum MarkdownTextFormatter {
 
         transformedLine = linkifyInlineCodeFileReferences(in: transformedLine)
         return linkifyGenericPathTokens(in: transformedLine)
+    }
+
+    private static func normalizeExplicitFileLinks(in line: String) -> String {
+        let text = line as NSString
+        let codeRanges = inlineCodeRanges(in: line)
+        let mutableLine = NSMutableString(string: line)
+        for link in TurnMessageRegexCache.markdownLinks(in: line).reversed() {
+            guard !link.isImage,
+                  !TurnMessageRegexCache.rangeOverlaps(
+                    NSRange(location: link.range.location, length: 1),
+                    protectedRanges: codeRanges
+                  ),
+                  let path = WorkspaceFileLinkResolver.localPath(
+                    fromRawDestination: text.substring(with: link.destinationRange)
+                  ),
+                  let url = WorkspaceFileLinkResolver.internalURL(for: path) else {
+                continue
+            }
+            mutableLine.replaceCharacters(in: link.destinationRange, with: url.absoluteString)
+        }
+        return String(mutableLine)
     }
 
     private static func linkifyFileReferenceLine(_ line: String) -> String? {
@@ -106,7 +128,7 @@ enum MarkdownTextFormatter {
             return nil
         }
 
-        return "\(prefix)File: [\(parsed.label)](\(escapeMarkdownLinkDestination(parsed.destination)))"
+        return "\(prefix)File: [\(parsed.label)](\(parsed.destination))"
     }
 
     private static func linkifyGenericPathTokens(in line: String) -> String {
@@ -141,7 +163,7 @@ enum MarkdownTextFormatter {
                 continue
             }
 
-            let replacement = "[\(parsed.label)](\(escapeMarkdownLinkDestination(parsed.destination)))"
+            let replacement = "[\(parsed.label)](\(parsed.destination))"
             mutableLine.replaceCharacters(in: matchRange, with: replacement)
         }
 
@@ -185,7 +207,7 @@ enum MarkdownTextFormatter {
                 continue
             }
 
-            let replacement = "[\(parsed.label)](\(escapeMarkdownLinkDestination(parsed.destination)))"
+            let replacement = "[\(parsed.label)](\(parsed.destination))"
             mutableLine.replaceCharacters(in: fullMatchRange, with: replacement)
         }
 
@@ -194,7 +216,7 @@ enum MarkdownTextFormatter {
 
     private static func isStandaloneInlineCodeFileReference(_ token: String) -> Bool {
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed == token else {
+        guard !trimmed.isEmpty, trimmed == token, !trimmed.contains("](") else {
             return false
         }
 
@@ -242,13 +264,6 @@ enum MarkdownTextFormatter {
         TurnMessageRegexCache.rangeOverlaps(range, protectedRanges: linkRanges)
     }
 
-    private static func escapeMarkdownLinkDestination(_ destination: String) -> String {
-        destination
-            .replacingOccurrences(of: " ", with: "%20")
-            .replacingOccurrences(of: "(", with: "%28")
-            .replacingOccurrences(of: ")", with: "%29")
-    }
-
     private static func parseFileReference(_ rawReference: String) -> (label: String, destination: String)? {
         var candidate = rawReference
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -262,39 +277,29 @@ enum MarkdownTextFormatter {
             candidate.removeFirst()
         }
 
-        guard candidate.hasPrefix("/") || candidate.contains("/") else {
+        let fullRange = NSRange(location: 0, length: (candidate as NSString).length)
+        guard let path = WorkspaceFileLinkResolver.localPath(fromRawDestination: candidate),
+              let destination = WorkspaceFileLinkResolver.internalURL(for: path)?.absoluteString else {
             return nil
         }
-
-        let fullRange = NSRange(location: 0, length: (candidate as NSString).length)
-
-        var path = candidate
         var lineNumber: String?
 
         if let lineRegex = TurnMessageRegexCache.filenameWithLine,
            let match = lineRegex.firstMatch(in: candidate, range: fullRange),
            match.numberOfRanges >= 3 {
             let nsCandidate = candidate as NSString
-            path = nsCandidate.substring(with: match.range(at: 1))
             lineNumber = nsCandidate.substring(with: match.range(at: 2))
         }
 
-        let basename = (path as NSString).lastPathComponent
+        let basename = WorkspaceFileLinkResolver.displayFileName(for: path)
         guard !basename.isEmpty else {
             return nil
         }
-        guard basename.contains(".") || lineNumber != nil else {
-            return nil
-        }
-
         let label: String
-        let destination: String
         if let lineNumber {
             label = "\(basename) (line \(lineNumber))"
-            destination = "\(path):\(lineNumber)"
         } else {
             label = basename
-            destination = path
         }
 
         return (label, destination)

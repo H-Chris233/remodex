@@ -37,9 +37,9 @@ jobs:
         with:
           node-version: 24
 
-      - name: Check recovery, completion badges, and file-change path identity
+      - name: Check recovery, completion badges, and local file handling
         working-directory: phodex-bridge
-        run: node --test test/ios-stream-recovery.test.js test/ios-completion-badges.test.js test/ios-file-change-paths.test.js
+        run: node --test test/ios-stream-recovery.test.js test/ios-completion-badges.test.js test/ios-file-change-paths.test.js test/ios-workspace-file-links.test.js test/ios-workspace-downloads.test.js
 
       - name: Build unsigned IPA
         run: |

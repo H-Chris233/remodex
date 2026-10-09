@@ -24,6 +24,7 @@ struct ZoomableImagePreviewScreen: View {
     let onDismiss: () -> Void
 
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.workspaceFileDownloadRequest) private var workspaceFileDownloadRequest
     @State private var isShowingShareSheet = false
     @State private var alertMessage: String?
     @State private var saveCoordinator = ImageSaveCoordinator()
@@ -99,6 +100,12 @@ struct ZoomableImagePreviewScreen: View {
             Spacer(minLength: 0)
 
             HStack(spacing: 10) {
+                if workspaceFileDownloadRequest?.threadId != nil {
+                    WorkspaceFileDownloadButton()
+                        .frame(width: 38, height: 38)
+                        .adaptiveGlass(.regular, in: Circle())
+                }
+
                 themedCircleButton(systemName: "square.and.arrow.up") {
                     isShowingShareSheet = true
                 }

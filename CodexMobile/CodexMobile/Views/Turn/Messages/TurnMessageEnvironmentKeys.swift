@@ -7,6 +7,26 @@
 
 import SwiftUI
 
+private struct WorkspaceFileOpenActionKey: EnvironmentKey {
+    static let defaultValue: ((WorkspaceFilePreviewRequest) -> Void)? = nil
+}
+
+private struct WorkspaceFileDownloadRequestKey: EnvironmentKey {
+    static let defaultValue: WorkspaceFilePreviewRequest? = nil
+}
+
+extension EnvironmentValues {
+    var workspaceFileOpenAction: ((WorkspaceFilePreviewRequest) -> Void)? {
+        get { self[WorkspaceFileOpenActionKey.self] }
+        set { self[WorkspaceFileOpenActionKey.self] = newValue }
+    }
+
+    var workspaceFileDownloadRequest: WorkspaceFilePreviewRequest? {
+        get { self[WorkspaceFileDownloadRequestKey.self] }
+        set { self[WorkspaceFileDownloadRequestKey.self] = newValue }
+    }
+}
+
 private struct ReconnectActionKey: EnvironmentKey {
     static let defaultValue: (() -> Void)? = nil
 }

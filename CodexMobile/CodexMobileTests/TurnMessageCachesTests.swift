@@ -57,7 +57,7 @@ final class TurnMessageCachesTests: XCTestCase {
 
         XCTAssertEqual(
             rendered,
-            "Verificato: [secure-transport.test.js](phodex-bridge/test/secure-transport.test.js) passa."
+            "Verificato: [secure-transport.test.js](remodex-file://open?path=phodex-bridge%2Ftest%2Fsecure-transport.test.js) passa."
         )
     }
 
