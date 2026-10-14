@@ -23,8 +23,8 @@ async function harness(t, options = {}) {
     for (const record of records) if (record.socket.readyState === WebSocket.OPEN
       && record.threads.has(params.threadId)) record.socket.send(JSON.stringify({ method, params }));
   };
-  native.on("connection", (socket) => {
-    const record = { socket, threads: new Set(), messages: [] };
+  native.on("connection", (socket, request) => {
+    const record = { socket, headers: request.headers, threads: new Set(), messages: [] };
     records.push(record);
     socket.on("message", (data) => {
       const raw = data.toString(), request = JSON.parse(raw);
@@ -40,6 +40,11 @@ async function harness(t, options = {}) {
       } else if (request.method === "thread/loaded/list") {
         result({ data: [...loaded], nextCursor: null });
       } else if (request.method === "thread/resume") {
+        if (options.emptyRollout) {
+          socket.send(JSON.stringify({ id: request.id, error: { code: -32600,
+            message: "no rollout found for thread id " + request.params.threadId } }));
+          return;
+        }
         record.threads.add(request.params.threadId);
         result({ thread: { id: request.params.threadId, turns: [] } });
       } else if (["thread/start", "thread/fork"].includes(request.method)) {
@@ -47,9 +52,10 @@ async function harness(t, options = {}) {
         record.threads.add("created-thread");
         result({ thread: { id: "created-thread", turns: [] } });
       } else if (request.method === "thread/realtime/start") {
+        record.threads.add(request.params.threadId);
         starts.push(request);
         if (options.rejectStart) {
-          socket.send(JSON.stringify({ id: request.id, error: { code: -32602, message: "Rejected before submitting." } }));
+          socket.send(JSON.stringify({ id: request.id, error: { code: -32602, message: "Rejected before submitting.", data: { nativeReason: "invalid-start" } } }));
         } else {
           if (!options.delayStartAck) result();
           if (options.ready !== false) setImmediate(() => {
@@ -59,6 +65,7 @@ async function harness(t, options = {}) {
           });
         }
       } else if (request.method === "thread/realtime/stop") {
+        record.threads.add(request.params.threadId);
         stops.push(request);
         result();
         if (options.closed !== false) setImmediate(() => emit("thread/realtime/closed", {
@@ -78,7 +85,7 @@ async function harness(t, options = {}) {
     for (const record of records) record.socket.terminate();
     await new Promise((resolve) => native.close(resolve));
   });
-  async function client(experimental = true) {
+  async function client(experimental = true, threadId = "thread-a") {
     const socket = new WebSocket(address.url);
     sockets.push(socket);
     const messages = [], pending = new Map();
@@ -98,7 +105,7 @@ async function harness(t, options = {}) {
     await rpc("initialize", { clientInfo: { name: "test-client", version: "1" },
       capabilities: { experimentalApi: experimental } });
     socket.send(JSON.stringify({ method: "initialized" }));
-    await rpc("thread/resume", { threadId: "thread-a", excludeTurns: true });
+    if (threadId) await rpc("thread/resume", { threadId, excludeTurns: true });
     return { socket, messages, rpc };
   }
   return { gateway, address, nativeUrl, records, starts, stops, loaded, responses, emit, client,
@@ -230,7 +237,9 @@ test("startup timeout retains the fence; late SDP is not delivered to the abando
 test("native rejection before submit releases ownership; unloaded tasks never cold-resume", async (t) => {
   const h = await harness(t, { rejectStart: true });
   const phone = await h.client();
-  assert.ok((await phoneStart(phone)).error);
+  const rejected = await phoneStart(phone);
+  assert.equal(rejected.error.code, -32602);
+  assert.deepEqual(rejected.error.data, { nativeReason: "invalid-start" });
   assert.equal((await phone.rpc("remodex/realtime/status", { threadId: "thread-a" })).result.state, "idle");
   assert.equal(h.stops.length, 0);
   const response = await phone.rpc("remodex/realtime/start", {
@@ -258,7 +267,7 @@ test("control-origin server requests round-trip to the task owner after Voice ha
   assert.deepEqual(h.responses[0].request, { id: 42, result: { content: [{ type: "text", text: "done" }] } });
 });
 
-test("control reconnection reinitializes and subscribes before cleanup, keeping a single fence", async (t) => {
+test("control reconnection initializes and checks the loaded task before native cleanup attaches its listener", async (t) => {
   const h = await harness(t, { closed: false });
   const phone = await h.client(), desktop = await h.client();
   await phoneStart(phone);
@@ -267,8 +276,9 @@ test("control reconnection reinitializes and subscribes before cleanup, keeping 
   previous.socket.terminate();
   await until(() => h.control !== previous && h.stops.length === 1);
   const methods = h.control.messages.map((m) => m.request.method);
-  assert.ok(methods.indexOf("initialize") < methods.indexOf("thread/resume"));
-  assert.ok(methods.indexOf("thread/resume") < methods.indexOf("thread/realtime/stop"));
+  assert.ok(methods.indexOf("initialize") < methods.indexOf("thread/loaded/list"));
+  assert.ok(methods.indexOf("thread/loaded/list") < methods.indexOf("thread/realtime/stop"));
+  assert.equal(methods.includes("thread/resume"), false);
   assert.ok((await desktopStart(desktop)).error);
   h.emit("thread/realtime/closed", { threadId: "thread-a", reason: "requested" });
   await until(() => phone.messages.some((m) => m.method === "thread/realtime/closed"));
@@ -320,4 +330,130 @@ test("a port collision rejects startup and closes its initialized control connec
   const gateway = createRealtimeGateway({ port: h.address.port, upstreamUrl: h.nativeUrl });
   await assert.rejects(gateway.start(), /EADDRINUSE/);
   await until(() => h.records.length === 2 && h.records[1].socket.readyState === WebSocket.CLOSED);
+});
+
+
+test("a loaded empty task starts Voice without resuming a nonexistent rollout", async (t) => {
+  const h = await harness(t, { emptyRollout: true });
+  const desktop = await h.client(true, null), phone = await h.client(true, null);
+  const created = await desktop.rpc("thread/start", { cwd: "C:/workspace" });
+  const threadId = created.result.thread.id;
+  const result = await phone.rpc("remodex/realtime/start", { ...phoneParams(), threadId,
+    version: "v3", outputModality: "audio", transport: { type: "webrtc", sdp: "v=0" } });
+  assert.deepEqual(result.result, {});
+  await until(() => phone.messages.some((message) => message.method === "thread/realtime/started"));
+  await phone.rpc("remodex/realtime/stop", { ...phoneParams(), threadId });
+  await until(() => phone.messages.some((message) => message.method === "thread/realtime/closed"));
+  assert.equal(h.control.messages.some((message) => message.request.method === "thread/resume"), false);
+  assert.equal(h.control.messages.some((message) => message.request.method === "turn/start"), false);
+});
+
+
+test("Voice task notifications use control once and continue after hanging up an empty task", async (t) => {
+  const h = await harness(t, { emptyRollout: true });
+  const desktop = await h.client(true, null), phone = await h.client(true, null);
+  const { thread } = (await desktop.rpc("thread/start", { cwd: "C:/workspace" })).result;
+  await phone.rpc("remodex/realtime/start", { ...phoneParams(), threadId: thread.id, outputModality: "audio" });
+  await until(() => phone.messages.some((message) => message.method === "thread/realtime/started"));
+  await phone.rpc("remodex/realtime/stop", { ...phoneParams(), threadId: thread.id });
+  await until(() => phone.messages.some((message) => message.method === "thread/realtime/closed"));
+  h.emit("turn/started", { threadId: thread.id, turn: { id: "voice-turn", status: "inProgress" } });
+  h.emit("item/agentMessage/delta", { threadId: thread.id, turnId: "voice-turn", itemId: "item-a", delta: "progress" });
+  await until(() => phone.messages.some((message) => message.params?.delta === "progress"), 200);
+  assert.equal(phone.messages.filter((message) => message.params?.delta === "progress").length, 1);
+  assert.equal(desktop.messages.filter((message) => message.params?.delta === "progress").length, 1);
+});
+
+test("an already subscribed Voice owner does not apply duplicate task deltas from two upstream sockets", async (t) => {
+  const h = await harness(t);
+  const phone = await h.client();
+  await phoneStart(phone);
+  await until(() => phone.messages.some((message) => message.method === "thread/realtime/started"));
+  h.emit("item/agentMessage/delta", { threadId: "thread-a", turnId: "turn-a", itemId: "item-a", delta: "one" });
+  await until(() => phone.messages.some((message) => message.params?.delta === "one"));
+  await delay(15);
+  assert.equal(phone.messages.filter((message) => message.params?.delta === "one").length, 1);
+});
+
+test("wrapper error classification distinguishes a stale lease from a cleanup barrier", async (t) => {
+  const h = await harness(t, { closed: false });
+  const phone = await h.client(), desktop = await h.client();
+  await phoneStart(phone);
+  const mismatch = await desktop.rpc("remodex/realtime/stop", { ...phoneParams(), leaseToken: "b".repeat(64) });
+  assert.equal(mismatch.error.data.errorCode, "lease_mismatch");
+  const busy = await desktopStart(desktop);
+  assert.equal(busy.error.data.errorCode, "voice_busy");
+  await phone.rpc("remodex/realtime/stop", phoneParams());
+  const closing = await phone.rpc("remodex/realtime/heartbeat", phoneParams());
+  assert.equal(closing.error.data.errorCode, "closing");
+});
+
+
+test("the loopback gateway requires its secret path and authenticates every native connection", async (t) => {
+  const nativeToken = "d".repeat(64), gatewayToken = "c".repeat(64);
+  const h = await harness(t, { gateway: { gatewayToken, nativeToken } });
+  assert.equal(new URL(h.address.url).pathname, `/voice/${gatewayToken}`);
+  const unauthorized = new WebSocket(new URL("/voice/" + "e".repeat(64), h.address.url));
+  const error = await new Promise((resolve) => unauthorized.once("error", resolve));
+  assert.match(error.message, /401/);
+  unauthorized.terminate();
+  const client = await h.client();
+  assert.equal(h.records.length, 2);
+  for (const record of h.records) assert.equal(record.headers.authorization, `Bearer ${nativeToken}`);
+  const status = await client.rpc("remodex/realtime/status", { threadId: "thread-a" });
+  assert.equal(JSON.stringify(status).includes(gatewayToken), false);
+  assert.equal(JSON.stringify(status).includes(nativeToken), false);
+});
+
+
+test("malformed credential configuration and unacknowledged realtime requests cannot start a session", async (t) => {
+  assert.throws(() => createRealtimeGateway({ gatewayToken: "short" }), /32-byte/);
+  assert.throws(() => createRealtimeGateway({ nativeToken: null }), /32-byte/);
+  const h = await harness(t);
+  const phone = await h.client();
+  phone.socket.send(JSON.stringify({ method: "remodex/realtime/start", params: {
+    ...phoneParams(), outputModality: "audio",
+  } }));
+  await until(() => phone.messages.some((message) => message.error?.data?.errorCode === "invalid_params"));
+  assert.equal(h.starts.length, 0);
+  assert.equal((await phone.rpc("remodex/realtime/status", { threadId: "thread-a" })).result.state, "idle");
+});
+
+
+test("fanout approvals do not duplicate the Voice owner's prompt and other subscribers keep their native path", async (t) => {
+  const h = await harness(t);
+  const phone = await h.client(), desktop = await h.client();
+  await phoneStart(phone);
+  await until(() => phone.messages.some((message) => message.method === "thread/realtime/started"));
+  const approval = { id: 85, method: "item/commandExecution/requestApproval",
+    params: { threadId: "thread-a", itemId: "command-b", turnId: "voice-turn" } };
+  // Native app-server sends one request ID to every subscribed connection.
+  for (const record of [...h.records].reverse()) if (record.threads.has("thread-a"))
+    record.socket.send(JSON.stringify(approval));
+  await until(() => phone.messages.some((message) => message.method === approval.method));
+  await delay(15);
+  const prompts = phone.messages.filter((message) => message.method === approval.method);
+  assert.equal(prompts.length, 1);
+  assert.notEqual(prompts[0].id, 85);
+  assert.equal(desktop.messages.filter((message) => message.method === approval.method).length, 1);
+  phone.socket.send(JSON.stringify({ id: prompts[0].id, result: { decision: "accept" } }));
+  await until(() => h.responses.length === 1);
+  assert.equal(h.responses[0].record, h.control);
+  assert.equal(h.responses[0].request.id, 85);
+});
+
+test("device user verification reaches the native-selected app even when control is not eligible", async (t) => {
+  const h = await harness(t);
+  const phone = await h.client();
+  await phoneStart(phone);
+  await until(() => phone.messages.some((message) => message.method === "thread/realtime/started"));
+  const selected = h.records.find((record) => record !== h.control && record.threads.has("thread-a"));
+  selected.socket.send(JSON.stringify({ id: 91, method: "mcpServer/elicitation/request", params: {
+    threadId: "thread-a", serverName: "example", mode: "openai/userVerification",
+    challenge: "challenge", title: "Confirm", description: "Native selects this app only.",
+  } }));
+  await until(() => phone.messages.some((message) => message.id === 91));
+  phone.socket.send(JSON.stringify({ id: 91, result: { action: "decline" } }));
+  await until(() => h.responses.length === 1);
+  assert.equal(h.responses[0].record, selected);
 });

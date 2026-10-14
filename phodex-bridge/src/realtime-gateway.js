@@ -1,9 +1,10 @@
 // Keeps realtime ownership on one ordered control connection; task RPCs stay per-client.
-const { randomUUID, timingSafeEqual } = require("node:crypto");
+const { randomBytes, randomUUID, timingSafeEqual } = require("node:crypto");
 const WebSocket = require("ws");
 
 function createRealtimeGateway({
   listenHost = "127.0.0.1", port = 4510, upstreamUrl = "ws://127.0.0.1:4511",
+  gatewayToken = randomBytes(32).toString("hex"), nativeToken = "",
   WebSocketImpl = WebSocket, WebSocketServerImpl = WebSocket.Server,
   leaseMs = 45_000, requestTimeoutMs = 20_000, reconnectDelayMs = 1_000,
   now = Date.now,
@@ -14,22 +15,36 @@ function createRealtimeGateway({
     || upstream.username || upstream.password || upstream.search || upstream.hash) {
     throw new Error("The realtime gateway and native runtime must use credential-free loopback addresses.");
   }
+  if (typeof gatewayToken !== "string" || !/^[0-9a-f]{64}$/.test(gatewayToken)
+    || typeof nativeToken !== "string" || (nativeToken && !/^[0-9a-f]{64}$/.test(nativeToken))) {
+    throw new Error("Gateway and native tokens must be 32-byte lowercase hex secrets.");
+  }
+  const secretPath = Buffer.from(`/voice/${gatewayToken}`);
+  const authenticatedPath = (url) => typeof url === "string" && Buffer.byteLength(url) === secretPath.length
+    && timingSafeEqual(Buffer.from(url), secretPath);
+  const upstreamOptions = { perMessageDeflate: false,
+    ...(nativeToken ? { headers: { Authorization: `Bearer ${nativeToken}` } } : {}) };
   let server, control, controlReady, reconnectTimer, leaseTimer, closing = false;
   const clients = new Set();
   const calls = new Map();
   const taskOwners = new Map();
   const serverRequests = new Map();
   const waiters = new Map();
-  const subscribed = new Set();
-  const subscriptions = new Map();
+  const loadedThreads = new Set();
+  const loadedChecks = new Map();
   const idKey = (id) => `${typeof id}:${id}`;
   const parse = (data) => { try { return JSON.parse(data.toString()); } catch { return null; } };
   const open = (socket) => socket?.readyState === WebSocketImpl.OPEN;
   const send = (socket, value) => { if (open(socket)) socket.send(JSON.stringify(value)); };
   const reply = (client, request, result = {}) => send(client.socket, { id: request.id, result });
-  const reject = (client, request, message, code = -32004) => send(client.socket, {
-    id: request.id, error: { code, message },
+  const reject = (client, request, message, code = -32004, errorCode = "control_unavailable") => send(client.socket, {
+    id: request.id, error: { code, message, data: { errorCode } },
   });
+  const rejectError = (client, request, error) => error.rpcError
+    ? send(client.socket, { id: request.id, error: error.rpcError })
+    : reject(client, request, error.message, -32004, error.errorCode || "control_unavailable");
+  const threadIdOf = (message) => message.params?.threadId || message.params?.thread?.id;
+  const gatewayError = (message, errorCode) => Object.assign(new Error(message), { errorCode });
   const tokenBytes = (token) => Buffer.from(token, "hex");
   const validToken = (token) => typeof token === "string" && /^[0-9a-f]{64}$/.test(token);
   const ownsPhone = (call, params) => Boolean(call?.phone && call.sessionId === params?.realtimeSessionId
@@ -66,9 +81,19 @@ function createRealtimeGateway({
     if (message.method === "thread/realtime/error") void stopCall(call);
   }
 
+  function taskOwner(threadId) {
+    if (!taskOwners.has(threadId)) return null;
+    let owner = taskOwners.get(threadId);
+    if (!open(owner.socket)) {
+      owner = [...clients].find((client) => client.initialized && open(client.socket) && client.threads.has(threadId));
+      if (owner) taskOwners.set(threadId, owner);
+    }
+    return owner && open(owner.socket) ? owner : null;
+  }
+
   function requestOwner(message) {
-    const threadId = message.params?.threadId || message.params?.conversationId;
-    const preferred = calls.get(threadId)?.client || taskOwners.get(threadId)
+    const threadId = threadIdOf(message) || message.params?.conversationId;
+    const preferred = calls.get(threadId)?.client || taskOwner(threadId)
       || (!threadId && [...calls.values()].find((call) => open(call.client.socket))?.client);
     if (preferred && open(preferred.socket)) return preferred;
     return [...clients].find((client) => client.initialized && open(client.socket)
@@ -104,13 +129,24 @@ function createRealtimeGateway({
       deliverServerRequest(entry);
       return;
     }
-    if (message.method?.startsWith("thread/realtime/")) forwardRealtime(message);
+    if (message.method?.startsWith("thread/realtime/")) { forwardRealtime(message); return; }
     if (message.method === "serverRequest/resolved") {
       const entry = serverRequests.get(idKey(message.params?.requestId));
-      if (entry?.client) send(entry.client.socket, {
-        ...message, params: { ...message.params, requestId: entry.downstreamId },
-      });
-      serverRequests.delete(idKey(message.params?.requestId));
+      if (entry) {
+        if (entry.client) send(entry.client.socket, {
+          ...message, params: { ...message.params, requestId: entry.downstreamId },
+        });
+        serverRequests.delete(idKey(message.params?.requestId));
+        return;
+      }
+    }
+    const threadId = threadIdOf(message);
+    const owner = taskOwner(threadId);
+    // Realtime start subscribes control even when an empty task has no resumable rollout.
+    if (owner) send(owner.socket, message);
+    if (["thread/closed", "thread/deleted"].includes(message.method)) {
+      taskOwners.delete(threadId);
+      loadedThreads.delete(threadId);
     }
   }
 
@@ -135,15 +171,15 @@ function createRealtimeGateway({
   }
 
   async function connectControl() {
-    const socket = new WebSocketImpl(upstreamUrl, { perMessageDeflate: false });
+    const socket = new WebSocketImpl(upstreamUrl, upstreamOptions);
     control = socket;
     socket.on("message", (data) => { if (control === socket) handleControlMessage(data); });
     socket.on("error", () => {});
     socket.on("close", () => {
       if (control !== socket) return;
       controlReady = null;
-      subscribed.clear();
-      subscriptions.clear();
+      loadedThreads.clear();
+      loadedChecks.clear();
       for (const waiter of waiters.values()) {
         clearTimeout(waiter.timer);
         waiter.reject(new Error("Native realtime control connection closed."));
@@ -190,10 +226,10 @@ function createRealtimeGateway({
     return controlReady;
   }
 
-  async function subscribe(threadId) {
+  async function ensureLoaded(threadId) {
     await ensureControl();
-    if (subscribed.has(threadId)) return;
-    if (subscriptions.has(threadId)) return subscriptions.get(threadId);
+    if (loadedThreads.has(threadId)) return;
+    if (loadedChecks.has(threadId)) return loadedChecks.get(threadId);
     const socket = control;
     const attempt = (async () => {
       let cursor;
@@ -202,17 +238,15 @@ function createRealtimeGateway({
         const page = await nativeRequest("thread/loaded/list", { limit: 100, ...(cursor ? { cursor } : {}) });
         if (page?.data?.includes(threadId)) break;
         cursor = page?.nextCursor;
-        if (!cursor || cursors.has(cursor)) throw new Error("The task is not loaded in the shared runtime. Open it in Codex first.");
+        if (!cursor || cursors.has(cursor)) throw gatewayError("The task is not loaded in the shared runtime. Open it in Codex first.", "thread_not_loaded");
         cursors.add(cursor);
       }
-      // Only an already loaded thread may be resumed: this subscribes without acquiring another writer.
-      const result = await nativeRequest("thread/resume", { threadId, excludeTurns: true });
-      if (result?.thread?.id !== threadId) throw new Error("The shared runtime resumed a different task.");
-      if (control !== socket || !open(socket)) throw new Error("Native realtime control changed while subscribing.");
-      subscribed.add(threadId);
+      // Native realtime RPCs attach this connection before enqueueing; resume needs a rollout even for loaded empty tasks.
+      if (control !== socket || !open(socket)) throw new Error("Native realtime control changed while checking the loaded task.");
+      loadedThreads.add(threadId);
     })();
-    subscriptions.set(threadId, attempt);
-    try { await attempt; } finally { if (subscriptions.get(threadId) === attempt) subscriptions.delete(threadId); }
+    loadedChecks.set(threadId, attempt);
+    try { await attempt; } finally { if (loadedChecks.get(threadId) === attempt) loadedChecks.delete(threadId); }
   }
 
   async function stopCall(call) {
@@ -222,7 +256,7 @@ function createRealtimeGateway({
     if (call.stopSent) return;
     call.stopSent = true;
     try {
-      await subscribe(call.threadId);
+      await ensureLoaded(call.threadId);
       await nativeRequest("thread/realtime/stop", { threadId: call.threadId });
     } catch (error) {
       if (!open(control) || error.rpcError) call.stopSent = false;
@@ -234,16 +268,16 @@ function createRealtimeGateway({
     const params = message.params || {};
     const threadId = params.threadId;
     if (!client.initialized || !client.experimental) {
-      reject(client, message, "Initialize with experimentalApi=true before starting Voice.", -32600);
+      reject(client, message, "Initialize with experimentalApi=true before starting Voice.", -32600, "not_initialized");
       return;
     }
     if (typeof threadId !== "string" || !threadId || (phone && (!validToken(params.leaseToken)
       || typeof params.realtimeSessionId !== "string" || !params.realtimeSessionId || params.realtimeSessionId.length > 128))) {
-      reject(client, message, "Voice requires a threadId and a private lease token.", -32602);
+      reject(client, message, "Voice requires a threadId, sessionId and a private lease token.", -32602, "invalid_params");
       return;
     }
     if (calls.has(threadId) || (phone && [...calls.values()].some((call) => call.phone))) {
-      reject(client, message, "A realtime session is already active or being cleaned up.");
+      reject(client, message, "A realtime session is already active or being cleaned up.", -32004, "voice_busy");
       return;
     }
     const sessionId = typeof params.realtimeSessionId === "string" && params.realtimeSessionId
@@ -253,8 +287,8 @@ function createRealtimeGateway({
       tokenBytes: phone ? tokenBytes(params.leaseToken) : null, expiresAt: now() + leaseMs };
     calls.set(threadId, call);
     try {
-      await subscribe(threadId);
-      if (calls.get(threadId) !== call || (client.closed && !phone)) throw new Error("Voice startup was cancelled.");
+      await ensureLoaded(threadId);
+      if (calls.get(threadId) !== call || (client.closed && !phone)) throw gatewayError("Voice startup was cancelled.", "startup_cancelled");
       const { leaseToken, ...startParams } = params;
       call.submitted = true;
       taskOwners.set(threadId, client);
@@ -263,7 +297,7 @@ function createRealtimeGateway({
     } catch (error) {
       if (!call.submitted || error.rpcError) release(call);
       else void stopCall(call);
-      reject(client, message, error.message, error.rpcError?.code || -32004);
+      rejectError(client, message, error);
     }
   }
 
@@ -280,6 +314,12 @@ function createRealtimeGateway({
     }
     if (closing) { if (message?.id != null) reject(client, message, "The realtime gateway is shutting down."); return; }
     const method = message?.method;
+    if ((method?.startsWith("remodex/realtime/") || ["thread/realtime/start", "thread/realtime/stop",
+      "thread/realtime/appendAudio", "thread/realtime/appendText", "thread/realtime/appendSpeech"].includes(method))
+      && typeof message.id !== "string" && !Number.isSafeInteger(message.id)) {
+      reject(client, { id: null }, "Realtime control requires a JSON-RPC request id.", -32600, "invalid_params");
+      return;
+    }
     if (method === "remodex/realtime/status") {
       const call = message.params?.threadId ? calls.get(message.params.threadId)
         : [...calls.values()].find((call) => call.phone) || calls.values().next().value;
@@ -289,15 +329,15 @@ function createRealtimeGateway({
     if (method === "remodex/realtime/heartbeat" || method === "remodex/realtime/stop") {
       const call = calls.get(message.params?.threadId);
       if (!ownsPhone(call, message.params)) {
-        reject(client, message, "The Voice lease does not match the current session."); return;
+        reject(client, message, "The Voice lease does not match the current session.", -32004, "lease_mismatch"); return;
       }
       if (!client.initialized || !client.experimental) {
-        reject(client, message, "Initialize the runtime before renewing Voice.", -32600); return;
+        reject(client, message, "Initialize the runtime before renewing Voice.", -32600, "not_initialized"); return;
       }
       call.client = client;
       taskOwners.set(call.threadId, client);
       if (method.endsWith("heartbeat")) {
-        if (call.phase === "closing") { reject(client, message, "Voice is being cleaned up."); return; }
+        if (call.phase === "closing") { reject(client, message, "Voice is being cleaned up.", -32004, "closing"); return; }
         call.expiresAt = now() + leaseMs;
         reply(client, message, callState(call));
       } else { void stopCall(call); reply(client, message); }
@@ -309,21 +349,21 @@ function createRealtimeGateway({
     if (method === "thread/realtime/stop") {
       const call = calls.get(message.params?.threadId);
       if (!call || call.phone || call.client !== client) {
-        reject(client, message, "Only the current realtime owner can stop this session."); return;
+        reject(client, message, "Only the current realtime owner can stop this session.", -32004, "owner_mismatch"); return;
       }
       void stopCall(call); reply(client, message); return;
     }
     if (["thread/realtime/appendAudio", "thread/realtime/appendText", "thread/realtime/appendSpeech"].includes(method)) {
       const call = calls.get(message.params?.threadId);
       if (!call || call.client !== client || call.phase === "closing") {
-        reject(client, message, "Only the current realtime owner can append to this session."); return;
+        reject(client, message, "Only the current realtime owner can append to this session.", -32004, "owner_mismatch"); return;
       }
       try { reply(client, message, await nativeRequest(method, message.params)); }
-      catch (error) { reject(client, message, error.message, error.rpcError?.code || -32004); }
+      catch (error) { rejectError(client, message, error); }
       return;
     }
     if (method?.startsWith("remodex/realtime/")) {
-      reject(client, message, "Unknown realtime gateway method.", -32601); return;
+      reject(client, message, "Unknown realtime gateway method.", -32601, "unknown_method"); return;
     }
     if (method === "initialize" && message.id != null) client.initializes.set(idKey(message.id),
       message.params?.capabilities?.experimentalApi === true);
@@ -340,7 +380,7 @@ function createRealtimeGateway({
   }
 
   function accept(socket) {
-    const client = { socket, upstream: new WebSocketImpl(upstreamUrl, { perMessageDeflate: false }),
+    const client = { socket, upstream: new WebSocketImpl(upstreamUrl, upstreamOptions),
       queue: [], queuedBytes: 0, initialized: false, experimental: false, closed: false,
       initializes: new Map(), threadRequests: new Map(), threads: new Set() };
     clients.add(client);
@@ -363,6 +403,8 @@ function createRealtimeGateway({
     client.upstream.on("message", (data, binary) => {
       const message = parse(data);
       if (message?.method?.startsWith("thread/realtime/")) return;
+      if (message?.method && taskOwner(threadIdOf(message)) === client
+        && (message.id == null || message.params?.mode !== "openai/userVerification")) return;
       if (message?.id != null && !message.method) {
         const key = idKey(message.id);
         if (client.initializes.has(key)) {
@@ -388,7 +430,8 @@ function createRealtimeGateway({
       try {
         await ensureControl();
         server = new WebSocketServerImpl({ host: listenHost, port,
-          verifyClient: ({ req }) => !req.headers.origin && loopback(req.socket.remoteAddress?.replace(/^::ffff:/, "")) });
+          verifyClient: ({ req }) => !req.headers.origin && authenticatedPath(req.url)
+            && loopback(req.socket.remoteAddress?.replace(/^::ffff:/, "")) });
         server.on("connection", accept);
         await new Promise((resolve, rejectStart) => { server.once("listening", resolve); server.once("error", rejectStart); });
       } catch (error) {
@@ -401,7 +444,7 @@ function createRealtimeGateway({
         }
       }, Math.min(1_000, Math.max(10, leaseMs / 3)));
       leaseTimer.unref();
-      return { host: listenHost, port: server.address().port, url: `ws://${listenHost.includes(":") ? `[${listenHost}]` : listenHost}:${server.address().port}` };
+      return { host: listenHost, port: server.address().port, url: `ws://${listenHost.includes(":") ? `[${listenHost}]` : listenHost}:${server.address().port}/voice/${gatewayToken}` };
     },
     async close() {
       closing = true;
