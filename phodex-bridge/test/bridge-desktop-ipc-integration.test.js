@@ -1737,6 +1737,16 @@ test("shared endpoint performs a real handshake and keeps realtime traffic out o
   assert.ok(transient.some((message) => message.method === "thread/realtime/sdp"));
   assert.equal(buffered.some((message) => message.id === "heartbeat" || message.method === "thread/realtime/sdp"), false);
   assert.ok(buffered.some((message) => message.method === "turn/completed"));
+
+  relaySocket.send(JSON.stringify({ id: "timeline", method: "thread/timeline/list", params: { threadId: "task" } }));
+  await waitFor(() => fakeCodex.sent.some((message) => message.id === "timeline"));
+  fakeCodex.emitMessage({ id: "timeline", result: { activeRealtimeSessionAtPageStart: "session", data: [
+    { type: "item", position: 1, turnId: "turn", item: { id: "delegation", type: "userMessage", content: [{ type: "text", text: "<realtime_delegation><input>Fix it</input></realtime_delegation>" }] } },
+  ] } });
+  const timeline = await waitForMessage(messages, (message) => message.id === "timeline");
+  assert.equal(timeline.result.activeRealtimeSessionAtPageStart, "session");
+  assert.equal(timeline.result.data[0].item.remodexRealtimeDelegation, true);
+  assert.equal(timeline.result.data[0].item.content, undefined);
 });
 
 // Loads bridge.js with plaintext test transports while leaving the production module untouched.

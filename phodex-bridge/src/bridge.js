@@ -839,6 +839,7 @@ function startBridge({
     "thread/read",
     "thread/resume",
     "thread/turns/list",
+    "thread/timeline/list",
   ]);
   const forwardedRequestMethodTTLms = 2 * 60_000;
   const pendingAuthLogin = {
