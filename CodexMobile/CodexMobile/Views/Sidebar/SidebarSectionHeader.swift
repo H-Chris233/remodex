@@ -35,6 +35,7 @@ struct SidebarSectionExpansionChevron: View {
 
 struct SidebarSectionHeader<Leading: View, LabelAccessory: View, Trailing: View>: View {
     let label: String
+    var runBadgeState: CodexThreadRunBadgeState? = nil
     var labelWeight: Font.Weight = .medium
     var verticalPadding: (top: CGFloat, bottom: CGFloat) = (18, 0)
     let onToggle: () -> Void
@@ -48,6 +49,7 @@ struct SidebarSectionHeader<Leading: View, LabelAccessory: View, Trailing: View>
 
     init(
         label: String,
+        runBadgeState: CodexThreadRunBadgeState? = nil,
         labelWeight: Font.Weight = .medium,
         verticalPadding: (top: CGFloat, bottom: CGFloat) = (18, 0),
         onToggle: @escaping () -> Void,
@@ -57,6 +59,7 @@ struct SidebarSectionHeader<Leading: View, LabelAccessory: View, Trailing: View>
         contextMenu: (() -> UIMenu)? = nil
     ) {
         self.label = label
+        self.runBadgeState = runBadgeState
         self.labelWeight = labelWeight
         self.verticalPadding = verticalPadding
         self.onToggle = onToggle
@@ -109,6 +112,12 @@ struct SidebarSectionHeader<Leading: View, LabelAccessory: View, Trailing: View>
 
                     labelAccessory()
                         .fixedSize()
+
+                    if let runBadgeState {
+                        SidebarThreadRunBadgeView(state: runBadgeState)
+                            .fixedSize()
+                            .padding(.leading, 4)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -121,6 +130,7 @@ struct SidebarSectionHeader<Leading: View, LabelAccessory: View, Trailing: View>
 extension SidebarSectionHeader where LabelAccessory == EmptyView {
     init(
         label: String,
+        runBadgeState: CodexThreadRunBadgeState? = nil,
         labelWeight: Font.Weight = .medium,
         verticalPadding: (top: CGFloat, bottom: CGFloat) = (18, 0),
         onToggle: @escaping () -> Void,
@@ -130,6 +140,7 @@ extension SidebarSectionHeader where LabelAccessory == EmptyView {
     ) {
         self.init(
             label: label,
+            runBadgeState: runBadgeState,
             labelWeight: labelWeight,
             verticalPadding: verticalPadding,
             onToggle: onToggle,
