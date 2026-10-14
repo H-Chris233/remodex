@@ -4178,3 +4178,29 @@ test("oversized history keeps the native Voice delegation identity marker", () =
   assert.equal(item.remodexRealtimeDelegation, true);
   assert.equal(item.text, "Fix it");
 });
+
+
+test("canonical voice timeline keeps session boundaries and delegation identity without duplicating task payloads", () => {
+  const voice = { type: "realtime", position: 2, item: { type: "transcriptSegment", id: "voice-1", realtimeSessionId: "session-1", role: "user", text: "Fix it" } };
+  const closed = { type: "realtime", position: 4, item: { type: "realtimeSessionClosed", realtimeSessionId: "session-1" } };
+  const response = JSON.parse(sanitizeThreadHistoryImagesForRelay(JSON.stringify({
+    id: "timeline", result: { activeRealtimeSessionAtPageStart: "session-1", nextCursor: "next", data: [
+      { type: "item", position: 1, turnId: "turn-1", item: { id: "delegated", type: "userMessage", content: [{ type: "text", text: "<realtime_delegation><input>Fix it</input></realtime_delegation>" }] } },
+      voice,
+      { type: "item", position: 3, turnId: "turn-1", item: { id: "output", type: "commandExecution", output: "A".repeat(4 * 1024 * 1024) } },
+      closed,
+    ] },
+  }), "thread/timeline/list"));
+  assert.equal(response.result.nextCursor, "next");
+  assert.equal(response.result.activeRealtimeSessionAtPageStart, "session-1");
+  const [delegated, transcript, output, boundary] = response.result.data;
+  assert.equal(delegated.position, 1);
+  assert.equal(delegated.turnId, "turn-1");
+  assert.equal(delegated.item.id, "delegated");
+  assert.equal(delegated.item.remodexRealtimeDelegation, true);
+  assert.equal(delegated.item.text, undefined);
+  assert.deepEqual(transcript, voice);
+  assert.equal(output.item.output, undefined);
+  assert.deepEqual(boundary, closed);
+  assert.ok(JSON.stringify(response).length < 2000);
+});

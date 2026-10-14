@@ -3691,6 +3691,16 @@ function isRelayBoundServerRequestMethod(method) {
 // Shrinks thread history snapshots/pages for mobile relay delivery.
 // This elides bulky blobs and replaces oversized older history with a compact marker.
 function sanitizeThreadHistoryImagesForRelay(rawMessage, requestMethod, requestContext = {}) {
+  if (requestMethod === "thread/timeline/list") {
+    const parsed = parseBridgeJSON(rawMessage);
+    if (!Array.isArray(parsed?.result?.data)) return rawMessage;
+    // Ordinary text comes from turns/list; timeline only needs its identity and canonical position.
+    return JSON.stringify({ ...parsed, result: { ...parsed.result, data: parsed.result.data.map((entry) =>
+      entry?.type === "item" && entry.item ? { ...entry,
+        item: compactHistoryItemForRelay(sanitizeUserRoleItem(entry.item) || entry.item, 0),
+      } : entry),
+    } });
+  }
   if (requestMethod === "thread/turns/list") {
     return sanitizeThreadTurnsListForRelay(rawMessage, requestContext);
   }
