@@ -28,6 +28,7 @@ struct SidebarProjectSectionHeader: View {
     var body: some View {
         SidebarSectionHeader(
             label: group.label,
+            runBadgeState: group.runBadgeState,
             onToggle: onToggle,
             leadingIcon: { leadingIcon },
             labelAccessory: {

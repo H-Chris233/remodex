@@ -73,11 +73,10 @@ struct SidebarThreadListView: View {
                 ForEach(groups.filter { $0.kind == .pinned }) { group in
                     groupSection(group)
                 }
-                ForEach(codex.desktopSidebarSnapshot?.sections ?? []) { section in
-                    let sectionGroups = section.projectIds.compactMap { id in groups.first { $0.desktopProject?.id == id } }
-                    if !sectionGroups.isEmpty { desktopSection(section, groups: sectionGroups) }
+                ForEach(projectSections) { section in
+                    projectSection(section)
                 }
-                ForEach(groups.filter { $0.kind != .pinned && !sectionedProjectIDs.contains($0.desktopProject?.id ?? "") }) { group in
+                ForEach(groups.filter { $0.kind == .chat }) { group in
                     groupSection(group)
                 }
             }
@@ -114,25 +113,46 @@ struct SidebarThreadListView: View {
         }
     }
 
-    private var sectionedProjectIDs: Set<String> {
-        Set((codex.desktopSidebarSnapshot?.sections ?? []).flatMap(\.projectIds))
+    private var projectSections: [SidebarProjectSection] {
+        SidebarThreadGrouping.makeProjectSections(
+            from: groups,
+            desktopSections: codex.desktopSidebarSnapshot?.sections ?? []
+        )
     }
 
-    private func desktopSection(_ section: CodexDesktopSidebarSection, groups: [SidebarThreadGroup]) -> some View {
+    private func projectSection(_ section: SidebarProjectSection) -> some View {
         let expanded = isFiltering || !codex.desktopCollapsedSectionIDs.contains(section.id)
         return VStack(alignment: .leading, spacing: 0) {
-            SidebarSectionHeader(label: section.name, labelWeight: .semibold, onToggle: {
-                var collapsed = codex.desktopCollapsedSectionIDs
-                if collapsed.contains(section.id) { collapsed.remove(section.id) } else { collapsed.insert(section.id) }
-                withAnimation(.snappy(duration: 0.22)) { codex.setDesktopCollapsedSections(collapsed) }
-            }, leadingIcon: { EmptyView() }, labelAccessory: {
-                SidebarSectionExpansionChevron(isExpanded: expanded)
-            }, trailing: { EmptyView() })
+            SidebarSectionHeader(
+                label: section.label,
+                runBadgeState: SidebarThreadGrouping.aggregateRunBadgeState(section.groups.compactMap(\.runBadgeState)),
+                labelWeight: .semibold,
+                verticalPadding: (8, 8),
+                onToggle: {
+                    var collapsed = codex.desktopCollapsedSectionIDs
+                    if collapsed.contains(section.id) { collapsed.remove(section.id) } else { collapsed.insert(section.id) }
+                    withAnimation(.snappy(duration: 0.22)) { codex.setDesktopCollapsedSections(collapsed) }
+                },
+                leadingIcon: {
+                    RemodexIcon.image(systemName: "square.stack.3d.up", size: 18, weight: .semibold)
+                        .foregroundStyle(Color.accentColor)
+                        .accessibilityHidden(true)
+                },
+                labelAccessory: { SidebarSectionExpansionChevron(isExpanded: expanded) },
+                trailing: { EmptyView() }
+            )
+            .padding(.horizontal, 8)
+            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
             .padding(.horizontal)
+            .padding(.top, 18)
             if expanded {
-                ForEach(groups) { group in groupSection(group) }
+                ForEach(section.groups) { group in
+                    groupSection(group)
+                        .padding(.leading, 20)
+                }
             }
         }
+        .clipped()
     }
 
     @ViewBuilder
@@ -154,6 +174,7 @@ struct SidebarThreadListView: View {
             SidebarPinnedSectionHeader(
                 label: group.label,
                 isExpanded: isPinnedExpanded,
+                runBadgeState: group.runBadgeState,
                 onToggle: {
                     withAnimation(.easeInOut(duration: 0.2)) {
                         isPinnedExpanded.toggle()
@@ -426,6 +447,9 @@ struct SidebarThreadListView: View {
             return activityThreads.filter(\.isSubagent).map(\.id)
         }
         var visibleThreadIDs: [String] = []
+        let visibleProjectGroupIDs = Set(projectSections
+            .filter { isFiltering || !codex.desktopCollapsedSectionIDs.contains($0.id) }
+            .flatMap { $0.groups.map(\.id) })
 
         for group in groups {
             switch group.kind {
@@ -441,7 +465,8 @@ struct SidebarThreadListView: View {
                     )
                 }
             case .project:
-                guard expandedProjectGroupIDs.contains(group.id) else { continue }
+                guard visibleProjectGroupIDs.contains(group.id),
+                      isFiltering || expandedProjectGroupIDs.contains(group.id) else { continue }
                 let hierarchy = SidebarSubagentHierarchy(groupThreads: group.threads)
                 let visibleRootThreads = SidebarProjectThreadPreviewState.visibleRootThreads(
                     for: group,
@@ -608,10 +633,8 @@ struct SidebarThreadListView: View {
 
 // MARK: - Preview fixtures (UI iteration)
 //
-// Mirrors the screenshot layout: a Pinned section and two project sections
-// (`omnara-voice` and `phodex-bridge`) with several chats each. Edit
-// `SidebarThreadGroupBlock` to iterate on the block look; this preview will
-// reflect changes without needing to launch the simulator.
+// Includes Pinned, a desktop section, and an unassigned directory so hierarchy
+// and aggregate run badges can be checked in expanded and collapsed previews.
 
 private enum SidebarThreadListPreviewFixtures {
     static let now = Date()
@@ -645,32 +668,22 @@ private enum SidebarThreadListPreviewFixtures {
     static let allThreads: [CodexThread] =
         [pinnedThread] + omnaraThreads + bridgeThreads
 
-    static let groups: [SidebarThreadGroup] = [
-        SidebarThreadGroup(
-            id: "pinned",
-            label: "Pinned",
-            kind: .pinned,
-            sortDate: ago(8),
-            projectPath: nil,
-            threads: [pinnedThread]
-        ),
-        SidebarThreadGroup(
-            id: "/Users/dev/omnara-voice",
-            label: "omnara-voice",
-            kind: .project,
-            sortDate: ago(2),
-            projectPath: "/Users/dev/omnara-voice",
-            threads: omnaraThreads
-        ),
-        SidebarThreadGroup(
-            id: "/Users/dev/phodex-bridge",
-            label: "phodex-bridge",
-            kind: .project,
-            sortDate: ago(8),
-            projectPath: "/Users/dev/phodex-bridge",
-            threads: bridgeThreads
-        ),
-    ]
+    static let desktopSnapshot = CodexDesktopSidebarSnapshot(
+        schemaVersion: 1,
+        scopeKey: "preview",
+        revision: "preview-1",
+        projects: [CodexDesktopProject(id: "omnara", name: "omnara-voice", rootPaths: ["/Users/dev/omnara-voice"], projectId: nil)],
+        sections: [CodexDesktopSidebarSection(id: "opensource", name: "OpenSource", projectIds: ["omnara"])],
+        threadProjectIds: [:],
+        excludedThreadIds: []
+    )
+
+    static let groups = SidebarThreadGrouping.makeGroups(
+        from: allThreads,
+        pinnedThreadIDs: [pinnedThread.id],
+        desktopSnapshot: desktopSnapshot,
+        runBadgeStateByThreadID: runBadges
+    )
 
     static let runBadges: [String: CodexThreadRunBadgeState] = [
         "om-1": .running,
@@ -683,7 +696,14 @@ private enum SidebarThreadListPreviewFixtures {
 
 @MainActor
 @ViewBuilder
-private func sidebarThreadBlockPreviewBody(taskViewMode: SidebarTaskViewMode = .projects) -> some View {
+private func sidebarThreadBlockPreviewBody(
+    taskViewMode: SidebarTaskViewMode = .projects,
+    collapsedSections: Bool = false
+) -> some View {
+    let service = CodexService()
+    let _ = service.desktopSidebarSnapshot = SidebarThreadListPreviewFixtures.desktopSnapshot
+    let _ = service.desktopCollapsedSectionIDs = collapsedSections
+        ? ["opensource", SidebarThreadGrouping.otherProjectSectionID] : []
     ScrollView {
         SidebarThreadListView(
             taskViewMode: taskViewMode,
@@ -707,7 +727,7 @@ private func sidebarThreadBlockPreviewBody(taskViewMode: SidebarTaskViewMode = .
         )
     }
     .background(Color(.systemBackground))
-    .environment(CodexService())
+    .environment(service)
 }
 
 #Preview("Sidebar Thread Block — Dark") {
@@ -722,4 +742,9 @@ private func sidebarThreadBlockPreviewBody(taskViewMode: SidebarTaskViewMode = .
 
 #Preview("Sidebar Activity") {
     sidebarThreadBlockPreviewBody(taskViewMode: .activity)
+}
+
+#Preview("Sidebar Collapsed Sections") {
+    sidebarThreadBlockPreviewBody(collapsedSections: true)
+        .preferredColorScheme(.dark)
 }

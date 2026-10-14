@@ -8,6 +8,35 @@ import XCTest
 @testable import CodexMobile
 
 final class SidebarThreadGroupingTests: XCTestCase {
+    func testAggregateBadgeKeepsRunningVisibleAlongsideOtherStates() {
+        let states: [CodexThreadRunBadgeState] = [.ready, .failed, .waitingOnUser, .goalActive, .goalAttention]
+        XCTAssertEqual(SidebarThreadGrouping.aggregateRunBadgeState(states + [.running]), .running)
+        XCTAssertEqual(SidebarThreadGrouping.aggregateRunBadgeState(states), .waitingOnUser)
+        XCTAssertNil(SidebarThreadGrouping.aggregateRunBadgeState([]))
+        for state in states {
+            XCTAssertEqual(SidebarThreadGrouping.aggregateRunBadgeState([state]), state)
+        }
+    }
+
+    func testOtherSectionAggregatesAllProjectThreadsAndClearsFinishedStatus() {
+        let threads = (0..<8).map { index in
+            CodexThread(id: "thread-\(index)", cwd: index == 0 ? "/work/first" : "/work/second")
+        }
+        let active = SidebarThreadGrouping.makeGroups(
+            from: threads,
+            runBadgeStateByThreadID: ["thread-0": .ready, "thread-7": .running]
+        )
+        XCTAssertEqual(active.first { $0.projectPath == "/work/second" }?.runBadgeState, .running)
+        let section = SidebarThreadGrouping.makeProjectSections(from: active)[0]
+        XCTAssertEqual(section.id, SidebarThreadGrouping.otherProjectSectionID)
+        XCTAssertEqual(SidebarThreadGrouping.aggregateRunBadgeState(section.groups.compactMap(\.runBadgeState)), .running)
+
+        let finished = SidebarThreadGrouping.makeGroups(from: threads, runBadgeStateByThreadID: ["thread-7": .ready])
+        XCTAssertEqual(finished.first { $0.projectPath == "/work/second" }?.runBadgeState, .ready)
+        let opened = SidebarThreadGrouping.makeGroups(from: threads)
+        XCTAssertTrue(opened.allSatisfy { $0.runBadgeState == nil })
+    }
+
     func testMakeGroupsPartitionsLiveThreadsByProjectPath() {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let threads = [

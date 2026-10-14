@@ -3,7 +3,7 @@
 //          (`cwd`) and rootless chat scope while excluding archived chats.
 // Layer: View Helper
 // Exports: SidebarTaskViewMode, SidebarThreadGroupKind, SidebarContentScope, SidebarThreadGroup,
-//          SidebarThreadGrouping
+//          SidebarProjectSection, SidebarThreadGrouping
 
 import Foundation
 
@@ -74,6 +74,7 @@ struct SidebarThreadGroup: Identifiable {
     let threads: [CodexThread]
     var desktopProject: CodexDesktopProject? = nil
     var desktopScopeKey: String? = nil
+    var runBadgeState: CodexThreadRunBadgeState? = nil
 
     var iconSystemName: String {
         switch kind {
@@ -91,7 +92,45 @@ struct SidebarThreadGroup: Identifiable {
     }
 }
 
+struct SidebarProjectSection: Identifiable {
+    let id: String
+    let label: String
+    let groups: [SidebarThreadGroup]
+}
+
 enum SidebarThreadGrouping {
+    static let otherProjectSectionID = "remodex:other-projects"
+
+    // Preserve desktop ordering, then collect every remaining directory in a phone-local section.
+    static func makeProjectSections(
+        from groups: [SidebarThreadGroup],
+        desktopSections: [CodexDesktopSidebarSection] = []
+    ) -> [SidebarProjectSection] {
+        let projectGroups = groups.filter { $0.kind == .project }
+        let sectionedProjectIDs = Set(desktopSections.flatMap(\.projectIds))
+        var sections = desktopSections.compactMap { section -> SidebarProjectSection? in
+            let sectionGroups = section.projectIds.compactMap { id in
+                projectGroups.first { $0.desktopProject?.id == id }
+            }
+            guard !sectionGroups.isEmpty else { return nil }
+            return SidebarProjectSection(id: section.id, label: section.name, groups: sectionGroups)
+        }
+        let otherGroups = projectGroups.filter { group in
+            guard let project = group.desktopProject else { return true }
+            return !sectionedProjectIDs.contains(project.id)
+        }
+        if !otherGroups.isEmpty {
+            sections.append(SidebarProjectSection(id: otherProjectSectionID, label: "其他", groups: otherGroups))
+        }
+        return sections
+    }
+
+    // A running descendant must remain visible even when another chat needs attention.
+    static func aggregateRunBadgeState(_ states: [CodexThreadRunBadgeState]) -> CodexThreadRunBadgeState? {
+        let priority: [CodexThreadRunBadgeState] = [.running, .waitingOnUser, .failed, .goalAttention, .ready, .goalActive]
+        return priority.first { states.contains($0) }
+    }
+
     // Activity spans all projects and rootless chats, independently of the
     // Projects/Chats scope used by the grouped presentation.
     static func activityThreads(
@@ -129,7 +168,8 @@ enum SidebarThreadGrouping {
                     kind: .pinned,
                     sortDate: firstPinned.updatedAt ?? firstPinned.createdAt ?? .distantPast,
                     projectPath: nil,
-                    threads: pinnedThreads
+                    threads: pinnedThreads,
+                    runBadgeState: aggregateRunBadgeState(pinnedThreads.compactMap { runBadgeStateByThreadID[$0.id] })
                 )
             )
         }
@@ -278,7 +318,8 @@ enum SidebarThreadGrouping {
         projectKey: String,
         projectPath: String?,
         threads: [CodexThread],
-        runBadgeStateByThreadID: [String: CodexThreadRunBadgeState]
+        runBadgeStateByThreadID: [String: CodexThreadRunBadgeState],
+        runBadgeState: CodexThreadRunBadgeState?
     ) -> SidebarThreadGroup {
         let sortedThreads = sortThreadsByRecentActivity(
             threads,
@@ -295,7 +336,8 @@ enum SidebarThreadGrouping {
             kind: .project,
             sortDate: sortDate,
             projectPath: projectPath,
-            threads: sortedThreads
+            threads: sortedThreads,
+            runBadgeState: runBadgeState
         )
     }
 
@@ -323,7 +365,8 @@ enum SidebarThreadGrouping {
                 .compactMap { $0.updatedAt ?? $0.createdAt }
                 .max() ?? .distantPast,
             projectPath: nil,
-            threads: sortedThreads
+            threads: sortedThreads,
+            runBadgeState: aggregateRunBadgeState(liveThreads.compactMap { runBadgeStateByThreadID[$0.id] })
         )
     }
 
@@ -426,25 +469,28 @@ enum SidebarThreadGrouping {
     ) -> [SidebarThreadGroup] {
         var liveThreadsByProject: [String: [CodexThread]] = [:]
         var projectPathByGroupKey: [String: String] = [:]
+        var badgeStatesByProject: [String: [CodexThreadRunBadgeState]] = [:]
         let desktopProjectsByKey = Dictionary(uniqueKeysWithValues: (desktopSnapshot?.projects ?? []).map { ("desktop:" + $0.id, $0) })
         let threadsByID = Dictionary(uniqueKeysWithValues: threads.map { ($0.id, $0) })
         for key in desktopProjectsByKey.keys { liveThreadsByProject[key] = [] }
 
         for thread in threads where thread.syncState != .archivedLocal {
-            guard !pinnedThreadIDs.contains(thread.id) else {
-                continue
+            let project = desktopSnapshot?.project(for: thread, threadsByID: threadsByID)
+            let projectKey = project.map { "desktop:" + $0.id } ?? thread.projectGroupKey
+            // Pinned chats leave the project list but still contribute to its status.
+            if let badge = runBadgeStateByThreadID[thread.id] {
+                badgeStatesByProject[projectKey, default: []].append(badge)
             }
-            if let project = desktopSnapshot?.project(for: thread, threadsByID: threadsByID) {
-                liveThreadsByProject["desktop:" + project.id, default: []].append(thread)
-                continue
-            }
-            liveThreadsByProject[thread.projectGroupKey, default: []].append(thread)
+            guard !pinnedThreadIDs.contains(thread.id) else { continue }
+            liveThreadsByProject[projectKey, default: []].append(thread)
+            if project != nil { continue }
             if let projectGroupPath = thread.projectGroupPath {
                 projectPathByGroupKey[thread.projectGroupKey] = projectGroupPath
             }
         }
 
         return liveThreadsByProject.map { projectKey, projectThreads in
+            let runBadgeState = aggregateRunBadgeState(badgeStatesByProject[projectKey] ?? [])
             if let project = desktopProjectsByKey[projectKey] {
                 return SidebarThreadGroup(
                     id: projectKey, label: project.name, kind: .project,
@@ -452,14 +498,16 @@ enum SidebarThreadGrouping {
                     projectPath: project.rootPaths.first,
                     threads: sortThreadsByRecentActivity(projectThreads, runBadgeStateByThreadID: runBadgeStateByThreadID),
                     desktopProject: project,
-                    desktopScopeKey: desktopSnapshot?.scopeKey
+                    desktopScopeKey: desktopSnapshot?.scopeKey,
+                    runBadgeState: runBadgeState
                 )
             }
             return makeProjectGroup(
                 projectKey: projectKey,
                 projectPath: projectPathByGroupKey[projectKey],
                 threads: projectThreads,
-                runBadgeStateByThreadID: runBadgeStateByThreadID
+                runBadgeStateByThreadID: runBadgeStateByThreadID,
+                runBadgeState: runBadgeState
             )
         }
         .sorted { lhs, rhs in
