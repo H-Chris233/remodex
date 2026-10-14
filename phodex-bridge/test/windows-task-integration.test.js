@@ -20,6 +20,8 @@ test("Windows scheduled task survives its launcher, starts once, and stops only 
     const child = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {windowsHide:true,stdio:'ignore'});
     fs.appendFileSync(path.join(process.env.REMODEX_DEVICE_STATE_DIR,'starts.log'), 'started\\n');
     fs.writeFileSync(path.join(process.env.REMODEX_DEVICE_STATE_DIR,'children.json'), JSON.stringify([process.pid,child.pid]));
+    console.log('fixture stdout 中文');
+    console.error('fixture stderr 中文');
     setInterval(()=>{},1000);
   `);
   const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
@@ -44,6 +46,10 @@ test("Windows scheduled task survives its launcher, starts once, and stops only 
   assert.equal(fs.readFileSync(path.join(directory, "starts.log"), "utf8"), "started\n");
   assert.equal(invokeTask("Status", { env }).running, true);
   assert.ok(pids.every(alive));
+  for (const stream of ['stdout', 'stderr']) {
+    const log = path.join(directory, 'logs', `bridge.${stream}.log`);
+    await waitFor(() => fs.existsSync(log) && fs.readFileSync(log, 'utf8').includes(`fixture ${stream} 中文`));
+  }
   const consoleRecord = path.join(directory, "consoles.json");
   execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `
     $ErrorActionPreference = 'Stop'

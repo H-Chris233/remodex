@@ -33,14 +33,36 @@ if ($Action -eq 'Run') {
     # Task Scheduler may terminate only the launcher. Record the exact child identity
     # so stop can also terminate its tree without ever trusting a recycled PID.
     $workerCommand = if ($WorkerKind -eq 'bridge') { 'run-service' } else { 'run-voice-runtime' }
-    $child = Start-Process -FilePath $config.nodePath -WindowStyle Hidden -PassThru `
-        -ArgumentList @(('"{0}"' -f $config.cliPath), $workerCommand) `
-        -WorkingDirectory (Split-Path -Parent $config.cliPath) `
-        -RedirectStandardOutput $stdout -RedirectStandardError $stderr
-    @{ taskName = $TaskName; pid = $child.Id; startedAtTicks = $child.StartTime.ToUniversalTime().Ticks.ToString(); nodePath = $config.nodePath } |
-        ConvertTo-Json -Compress | Set-Content -LiteralPath $workerRecord -Encoding UTF8
-    $child.WaitForExit()
-    exit $child.ExitCode
+    # Hidden Start-Process still allocates a console for Node; create none instead.
+    $start = [Diagnostics.ProcessStartInfo]::new($config.nodePath, ('"{0}" {1}' -f $config.cliPath, $workerCommand))
+    $start.WorkingDirectory = Split-Path -Parent $config.cliPath
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardInput = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $stdoutFile = $null
+    $stderrFile = $null
+    $child = $null
+    try {
+        # Disable buffering so logs remain readable while the worker is running.
+        $stdoutFile = [IO.FileStream]::new($stdout, 'Create', 'Write', 'Read', 1)
+        $stderrFile = [IO.FileStream]::new($stderr, 'Create', 'Write', 'Read', 1)
+        $child = [Diagnostics.Process]::Start($start)
+        $child.StandardInput.Close()
+        $output = $child.StandardOutput.BaseStream.CopyToAsync($stdoutFile)
+        $errors = $child.StandardError.BaseStream.CopyToAsync($stderrFile)
+        @{ taskName = $TaskName; pid = $child.Id; startedAtTicks = $child.StartTime.ToUniversalTime().Ticks.ToString(); nodePath = $config.nodePath } |
+            ConvertTo-Json -Compress | Set-Content -LiteralPath $workerRecord -Encoding UTF8
+        $child.WaitForExit()
+        $output.GetAwaiter().GetResult()
+        $errors.GetAwaiter().GetResult()
+        exit $child.ExitCode
+    } finally {
+        if ($child) { $child.Dispose() }
+        if ($stdoutFile) { $stdoutFile.Dispose() }
+        if ($stderrFile) { $stderrFile.Dispose() }
+    }
 }
 
 function Stop-OwnedWorker {
