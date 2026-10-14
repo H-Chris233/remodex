@@ -374,6 +374,35 @@ test("runtime reader uses the authoritative OpenCode API and bridge download rou
   }
 });
 
+test("local file metadata and chunks do not wait for an unresponsive Codex history request", async (t) => {
+  const f = fixture(t);
+  const local = f.file("artifact.ipa", Buffer.from([0, 255, 32, 7]));
+  let releaseHistory;
+  const history = new Promise((resolve) => { releaseHistory = resolve; });
+  const service = createWorkspaceFileDownloadService({
+    readThreadContext: createFileDownloadThreadReader({
+      sendCodexRequest: () => history,
+      readRollout: () => ({ cwd: f.cwd, turns: [] }),
+    }),
+  });
+  const pending = service.handleMethod("workspace/startFileDownload", { threadId: "thread-1", path: local });
+  let timer;
+  try {
+    const metadata = await Promise.race([pending, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Download is blocked behind Codex history; no size or byte progress is available.")), 1000);
+    })]);
+    assert.equal(metadata.byteLength, 4);
+    const chunk = await service.handleMethod("workspace/readFileChunk", { downloadId: metadata.downloadId, offset: 0 });
+    assert.deepEqual(Buffer.from(chunk.dataBase64, "base64"), fs.readFileSync(local));
+    assert.equal(chunk.eof, true);
+  } finally {
+    clearTimeout(timer);
+    releaseHistory({ thread: { id: "thread-1", cwd: f.cwd, turns: [] } });
+    await pending.catch(() => {});
+    await service.dispose();
+  }
+});
+
 test("Codex runtime reader augments missing recent citations with bounded trusted rollout results", async (t) => {
   const f = fixture(t);
   const turns = [{ id: "turn-1", items: [{ type: "message", role: "assistant", text: "trusted" }] }];
@@ -395,4 +424,25 @@ test("Codex runtime reader augments missing recent citations with bounded truste
     async sendCodexRequest() { return { thread: { id: "other-thread", cwd: f.root, turns } }; },
   });
   await assert.rejects(wrongThread("thread-1"), errorCode("thread_not_found"));
+});
+
+test("local history only bypasses Codex when it proves access to the requested external file", async (t) => {
+  const f = fixture(t);
+  const outside = f.file("outside.docx", "original bytes", true);
+  const turns = [{ id: "turn-1", items: [{ type: "agentMessage", text: `[File](<${outside}>)` }] }];
+  let canonicalReads = 0;
+  const canonical = async () => {
+    canonicalReads += 1;
+    return { thread: { id: "thread-1", cwd: f.cwd, turns } };
+  };
+  const local = createFileDownloadThreadReader({ sendCodexRequest: canonical,
+    readRollout: () => ({ cwd: f.cwd, turns }) });
+  assert.deepEqual(await local("thread-1", outside, "turn-1"), { cwd: f.cwd, turns });
+  assert.equal(canonicalReads, 0);
+  const incomplete = createFileDownloadThreadReader({ sendCodexRequest: canonical,
+    readRollout: () => ({ cwd: f.cwd, turns: [] }) });
+  assert.deepEqual(await incomplete("thread-1", outside, "turn-1"), { cwd: f.cwd, turns });
+  assert.equal(canonicalReads, 1);
+  await local("thread-1", outside, "other-turn");
+  assert.equal(canonicalReads, 2, "a citation in another turn cannot grant the fast path");
 });

@@ -428,6 +428,7 @@ extension CodexService {
             return
         }
 
+        let previousSession = secureSession
         let result = await foregroundConnectionProbeResult(
             timeoutNanoseconds: webSocketForegroundProbeTimeoutOverrideNanoseconds
                 ?? CodexWebSocketKeepAlivePolicy.foregroundProbeTimeoutNanoseconds
@@ -436,6 +437,7 @@ extension CodexService {
         if case .failure(let error) = result,
            isAppInForeground,
            isConnected || isInitialized {
+            if isRecoverableTransientConnectionError(error), hasReceivedSecureActivity(since: previousSession) { return }
             handleReceiveError(error)
         }
     }

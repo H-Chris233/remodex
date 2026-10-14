@@ -42,15 +42,19 @@ struct WorkspaceFileDownloadScreen: View {
                     }
                     .buttonStyle(.borderedProminent)
                 } else {
-                    if let progress, progress.totalBytes > 0 {
-                        ProgressView(value: Double(progress.bytesReceived), total: Double(progress.totalBytes))
+                    ProgressView(value: progress?.fractionCompleted ?? 0, total: 1)
+                        .progressViewStyle(.linear)
+                        .accessibilityLabel("File download progress")
+                    if let progress {
                         Text("\(Int(progress.fractionCompleted * 100))% · \(formattedSize(progress.bytesReceived)) of \(formattedSize(progress.totalBytes))")
                             .font(AppFont.caption())
                             .foregroundStyle(.secondary)
                     } else {
-                        ProgressView()
+                        Text("0% · Waiting for file size")
+                            .font(AppFont.caption())
+                            .foregroundStyle(.secondary)
                     }
-                    Text("Downloading file")
+                    Text(progress == nil ? "Preparing file on computer" : "Downloading file")
                         .font(AppFont.subheadline())
                     Button("Cancel", action: onDismiss)
                 }

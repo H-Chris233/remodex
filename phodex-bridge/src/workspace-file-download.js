@@ -23,10 +23,23 @@ function downloadError(errorCode, message) {
 
 // Only this bridge-side reader can supply cwd or assistant text; phone-provided context is ignored.
 function createFileDownloadThreadReader({ sendCodexRequest, openCodeRuntime, readRollout }) {
-  return async (threadId) => {
+  return async (threadId, requestedPath, turnId) => {
     const isOpenCode = openCodeRuntime?.handlesThreadId(threadId) === true;
-    let thread;
+    let fallback;
     let readError;
+    try {
+      fallback = !isOpenCode && readRollout ? await readRollout(threadId) : null;
+      if (fallback?.cwd && requestedPath) {
+        const { realWorkspaceRoot, realFilePath } = await resolveWorkspaceFileTarget(fallback.cwd, requestedPath);
+        if (realFilePath && ((realWorkspaceRoot && isPathInside(realFilePath, realWorkspaceRoot))
+          || await isReferencedExternalFile(fallback, turnId, requestedPath, realFilePath))) {
+          return fallback;
+        }
+      }
+    } catch (error) {
+      readError = error;
+    }
+    let thread;
     try {
       const params = buildCompleteThreadReadParams(threadId);
       const result = isOpenCode
@@ -38,12 +51,6 @@ function createFileDownloadThreadReader({ sendCodexRequest, openCodeRuntime, rea
       thread = result.thread;
     } catch (error) {
       readError = error;
-    }
-    let fallback;
-    try {
-      fallback = !isOpenCode && readRollout ? readRollout(threadId) : null;
-    } catch (error) {
-      readError ||= error;
     }
     const cwd = thread?.cwd || thread?.current_working_directory || fallback?.cwd;
     if (!cwd) {
@@ -182,7 +189,7 @@ function createWorkspaceFileDownloadService({ readThreadContext, now = Date.now 
     pendingStarts += 1;
     let handle;
     try {
-      const context = await readThreadContext(threadId);
+      const context = await readThreadContext(threadId, requestedPath, params.turnId);
       const { realWorkspaceRoot, realFilePath } = await resolveWorkspaceFileTarget(context.cwd, requestedPath);
       if (!realFilePath) throw downloadError("file_not_found", "The file no longer exists on this computer.");
       const inside = realWorkspaceRoot && isPathInside(realFilePath, realWorkspaceRoot);

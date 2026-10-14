@@ -180,6 +180,7 @@ extension CodexService {
             return
         }
 
+        let previousSession = secureSession
         do {
             // Poll recent metadata only; listThreads() uses the same cap during reconnect/refresh.
             let activeThreads = try await fetchCoalescedServerThreads(limit: recentActiveThreadListLimit)
@@ -187,10 +188,9 @@ extension CodexService {
             reconcileLocalThreadsWithServer(activeThreads)
             debugSyncLog("sync thread/list active=\(activeThreads.count) local=\(threads.count)")
         } catch {
-            // A capped thread/list timing out while the socket still accepts writes is the
-            // signature of a half-open connection: recover the transport instead of polling
-            // a dead peer every cycle.
             if isConnected, isAppInForeground, isRecoverableTransientConnectionError(error) {
+                // File chunks or other authenticated responses prove the bridge is still serving us.
+                if hasReceivedSecureActivity(since: previousSession) { return }
                 handleReceiveError(error)
                 return
             }

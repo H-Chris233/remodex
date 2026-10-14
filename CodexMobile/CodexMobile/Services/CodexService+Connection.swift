@@ -534,7 +534,8 @@ extension CodexService {
         // Thread resumes are transport-scoped; a fresh socket must be allowed to
         // issue `thread/resume` again for desktop-origin threads after recovery.
         resumedThreadIDs.removeAll()
-        failAllPendingRequests(with: error)
+        // Other callers lost the connection, not the request whose timeout triggered recovery.
+        failAllPendingRequests(with: isRecoverableTransientConnectionError(error) ? CodexServiceError.disconnected : error)
     }
 }
 
@@ -1068,6 +1069,13 @@ extension CodexService {
         let nsError = error as NSError
         return nsError.domain == NSPOSIXErrorDomain
             && nsError.code == Int(POSIXErrorCode.ETIMEDOUT.rawValue)
+    }
+
+    func hasReceivedSecureActivity(since previousSession: CodexSecureSession?) -> Bool {
+        guard let previousSession, let currentSession = secureSession else { return false }
+        return currentSession.sessionId != previousSession.sessionId
+            || currentSession.keyEpoch != previousSession.keyEpoch
+            || currentSession.lastInboundCounter > previousSession.lastInboundCounter
     }
 
     // Detects connect-time relay closes that still leave the saved session reusable moments later.
