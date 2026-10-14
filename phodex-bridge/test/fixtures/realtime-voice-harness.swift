@@ -3,6 +3,7 @@ import Foundation
 @main
 struct RealtimeVoiceChecks {
     static func main() async throws {
+        checkAudioMeters()
         var call = CodexRealtimeVoiceState()
         call.start()
         let first = call.generation
@@ -125,5 +126,66 @@ struct RealtimeVoiceChecks {
             fatalError("Released ownership was reacquired by a callback")
         } catch is CancellationError {}
         print("realtime voice checks passed")
+    }
+
+    static func checkAudioMeters() {
+        func sample(id: String = "mic", type: String = "media-source", timestamp: Double,
+                    level: Double? = nil, energy: Double? = nil, duration: Double? = nil) -> CodexVoiceAudioSample {
+            var values: [String: NSObject] = ["kind": "audio" as NSString]
+            if let level { values["audioLevel"] = NSNumber(value: level) }
+            if let energy { values["totalAudioEnergy"] = NSNumber(value: energy) }
+            if let duration { values["totalSamplesDuration"] = NSNumber(value: duration) }
+            return CodexVoiceAudioSample(id: id, type: type, timestamp: timestamp, values: values)!
+        }
+        func isLevel(_ meter: CodexVoiceAudioMeter, _ expected: Double) -> Bool {
+            abs(Double(meter.levels.last ?? -1) - expected) < 0.000001
+        }
+        assert(sample(timestamp: 1).source == .microphone)
+        assert(sample(type: "inbound-rtp", timestamp: 1).source == .assistant)
+        for type in ["outbound-rtp", "remote-inbound-rtp", "codec"] {
+            assert(CodexVoiceAudioSample(id: "ignored", type: type, timestamp: 1,
+                values: ["kind": "audio" as NSString, "audioLevel": NSNumber(value: 1)]) == nil)
+        }
+        assert(CodexVoiceAudioSample(id: "video", type: "inbound-rtp", timestamp: 1,
+            values: ["kind": "video" as NSString]) == nil)
+        assert(CodexVoiceAudioSample(id: "invalid", type: "media-source", timestamp: .nan,
+            values: ["kind": "audio" as NSString]) == nil)
+
+        var microphone = CodexVoiceAudioMeter(), assistant = CodexVoiceAudioMeter()
+        microphone.append(sample(timestamp: 1, level: 0.01))
+        assistant.append(sample(id: "speaker", type: "inbound-rtp", timestamp: 1, level: 0.1))
+        assert(isLevel(microphone, 0.2) && isLevel(assistant, 0.6))
+        microphone.append(sample(timestamp: 2, level: 1), enabled: false)
+        assert(isLevel(microphone, 0) && isLevel(assistant, 0.6))
+        microphone.reset()
+        assert(microphone.levels.isEmpty && !assistant.levels.isEmpty)
+
+        var measured = CodexVoiceAudioMeter()
+        measured.append(sample(timestamp: 1, energy: 0.2, duration: 5))
+        assert(isLevel(measured, 0))
+        measured.append(sample(timestamp: 2, energy: 0.201, duration: 5.1))
+        assert(isLevel(measured, 0.6))
+        // Stale levels cannot keep a remote waveform speaking after packets stop.
+        measured.append(sample(timestamp: 3, level: 1, energy: 0.201, duration: 5.1))
+        assert(isLevel(measured, 0))
+        measured.append(sample(timestamp: 4, level: 1, energy: 0, duration: 0))
+        assert(isLevel(measured, 0))
+        measured.append(sample(id: "new-track", timestamp: 5, level: 0.1, energy: 3, duration: 20))
+        assert(isLevel(measured, 0.6))
+        measured.append(sample(id: "new-track", timestamp: 5, level: 1))
+        assert(isLevel(measured, 0))
+        measured.append(nil)
+        assert(isLevel(measured, 0))
+        for invalid in [Double.nan, Double.infinity, -1] {
+            measured.reset()
+            measured.append(sample(timestamp: 1, level: invalid))
+            assert(isLevel(measured, 0))
+        }
+        measured.reset()
+        for time in 0..<(CodexVoiceAudioMeter.capacity + 10) {
+            measured.append(sample(timestamp: Double(time), level: 2))
+        }
+        assert(measured.levels.count == CodexVoiceAudioMeter.capacity)
+        assert(measured.levels.allSatisfy { $0 == 1 })
     }
 }

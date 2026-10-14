@@ -53,7 +53,7 @@ test("delegation provenance and shared-runtime human approval survive each decod
   assert.match(read("Models/CodexMessage.swift"), /decodeIfPresent\(Bool\.self, forKey: \.isRealtimeDelegation\) \?\? false/);
 });
 
-test("Swift call intent, canonical transcripts, and microphone ownership handle races", {
+test("Swift call intent, canonical transcripts, audio meters, and microphone ownership handle races", {
   skip: process.platform !== "darwin" ? "requires the macOS Swift compiler" : false,
   timeout: 60000,
 }, (t) => {
@@ -73,7 +73,7 @@ nonisolated enum RealtimeApprovalGuard {
 }
 `);
   execFileSync("xcrun", ["swiftc", "-default-isolation", "MainActor", "-module-cache-path", path.join(directory, "cache"), "-parse-as-library",
-    ...["JSONValue.swift", "CodexMessage.swift", "CodexMessageOrderCounter.swift", "CodexCollaboration.swift", "CodexAsyncUserInput.swift", "CodexAutoApprovalReview.swift", "CodexImageAttachment.swift", "CodexTextContentFingerprint.swift", "CodexRealtimeVoiceState.swift"].map((file) => path.join(mobile, "Models", file)), guard,
+    ...["JSONValue.swift", "CodexMessage.swift", "CodexMessageOrderCounter.swift", "CodexCollaboration.swift", "CodexAsyncUserInput.swift", "CodexAutoApprovalReview.swift", "CodexImageAttachment.swift", "CodexTextContentFingerprint.swift", "CodexRealtimeVoiceState.swift", "CodexVoiceAudioMeter.swift"].map((file) => path.join(mobile, "Models", file)), guard,
     path.join(mobile, "Services/VoiceAudioSessionOwnership.swift"), path.join(__dirname, "fixtures/realtime-voice-harness.swift"), "-o", binary], { timeout: 45000 });
   assert.match(execFileSync(binary, { encoding: "utf8", timeout: 10000 }), /realtime voice checks passed/);
 });

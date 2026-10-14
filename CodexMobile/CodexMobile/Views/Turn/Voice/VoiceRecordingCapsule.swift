@@ -1,7 +1,7 @@
 // FILE: VoiceRecordingCapsule.swift
 // Purpose: Live waveform panel shown above the composer during voice recording.
 // Layer: View Component
-// Exports: VoiceRecordingCapsule
+// Exports: VoiceRecordingCapsule, ScrollingWaveformLane
 // Depends on: SwiftUI
 
 import Combine
@@ -119,16 +119,19 @@ struct VoiceRecordingCapsule: View {
 // once). Scrolling therefore never keys off arrival timestamps: a free-running
 // clock advances at the nominal rate and is softly servo-corrected toward the
 // true sample count, so delivery jitter is absorbed instead of shown as a snap.
-private struct ScrollingWaveformLane: View {
+struct ScrollingWaveformLane: View {
     let levels: [CGFloat]
     let barWidth: CGFloat
     let barSpacing: CGFloat
     let minHeight: CGFloat
     let maxHeight: CGFloat
+    var tint: Color = .primary
+    var isAnimating = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     // Levels are emitted at a fixed cadence (one per meter window), so the
     // strip scrolls at a constant, known speed.
-    private let sampleInterval: TimeInterval = GPTVoiceTranscriptionManager.meterWindowSeconds
+    var sampleInterval: TimeInterval = GPTVoiceTranscriptionManager.meterWindowSeconds
 
     // Reference type on purpose: it mutates every frame inside the Canvas
     // renderer, where @State writes are not allowed (and no invalidation is
@@ -137,7 +140,7 @@ private struct ScrollingWaveformLane: View {
 
     var body: some View {
         GeometryReader { geometry in
-            TimelineView(.animation) { timeline in
+            TimelineView(.animation(paused: reduceMotion || !isAnimating)) { timeline in
                 Canvas { context, size in
                     draw(in: context, size: size, now: timeline.date)
                 }
@@ -180,7 +183,7 @@ private struct ScrollingWaveformLane: View {
             let rect = CGRect(x: minX, y: midY - height / 2, width: barWidth, height: height)
             context.fill(
                 Path(roundedRect: rect, cornerRadius: 1),
-                with: .color(.primary.opacity(0.15 + level * 0.65))
+                with: .color(tint.opacity(0.15 + level * 0.65))
             )
         }
     }

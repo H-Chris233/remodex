@@ -17,6 +17,8 @@ final class CodexRealtimeVoiceCoordinator: NSObject {
     private(set) var isInterrupted = false
     var isPresented = false
     private(set) var transcripts: [CodexVoiceTranscript] = []
+    private(set) var microphoneMeter = CodexVoiceAudioMeter()
+    private(set) var assistantMeter = CodexVoiceAudioMeter()
     @ObservationIgnored private weak var codex: CodexService?
     @ObservationIgnored private var peer: RTCPeerConnection?
     @ObservationIgnored private var events: RTCDataChannel?
@@ -257,8 +259,46 @@ final class CodexRealtimeVoiceCoordinator: NSObject {
         if let index = transcripts.firstIndex(where: { $0.id == transcript.id }) { transcripts[index] = transcript }
         else { transcripts.append(transcript) }
     }
+    // The call sheet owns this task, so minimizing it or backgrounding stops visual metering only.
+    func monitorAudioLevels() async {
+        resetAudioMeters()
+        while state.wantsActiveCall && !Task.isCancelled {
+            if state.phase == .active, !isInterrupted, let peer {
+                let generation = state.generation
+                let samples = await withCheckedContinuation { (continuation: CheckedContinuation<[CodexVoiceAudioSample], Never>) in
+                    peer.statistics { report in
+                        let samples = report.statistics.values.compactMap { entry in
+                            CodexVoiceAudioSample(id: entry.id, type: entry.type,
+                                timestamp: entry.timestamp_us, values: entry.values)
+                        }
+                        continuation.resume(returning: samples)
+                    }
+                }
+                guard !Task.isCancelled else { return }
+                if self.peer === peer, state.generation == generation,
+                   state.phase == .active, !isInterrupted {
+                    microphoneMeter.append(samples.first { $0.source == .microphone }, enabled: state.shouldTransmit)
+                    assistantMeter.append(samples.first { $0.source == .assistant })
+                }
+            } else {
+                resetAudioMeters()
+            }
+            do { try await Task.sleep(for: .seconds(CodexVoiceAudioMeter.sampleInterval)) }
+            catch { return }
+        }
+    }
+
+    private func resetAudioMeters() {
+        if !microphoneMeter.levels.isEmpty { microphoneMeter.reset() }
+        if !assistantMeter.levels.isEmpty { assistantMeter.reset() }
+    }
+
     func setMuted(_ muted: Bool) { state.isMuted = muted; applyMicrophoneState() }
-    private func applyMicrophoneState() { microphone?.isEnabled = state.shouldTransmit && !isInterrupted }
+    private func applyMicrophoneState() {
+        microphone?.isEnabled = state.shouldTransmit && !isInterrupted
+        if !state.shouldTransmit || isInterrupted { microphoneMeter.reset() }
+        if state.phase != .active || isInterrupted { assistantMeter.reset() }
+    }
     func toggleSpeaker() {
         guard let audioOwner else { return }
         usesSpeaker.toggle()
@@ -448,6 +488,7 @@ final class CodexRealtimeVoiceCoordinator: NSObject {
     func end(graceful: Bool = true) {
         guard isLive, state.phase != .ending else { return }
         state.end()
+        resetAudioMeters()
         startTask?.cancel()
         recoveryTask?.cancel()
         operationExpiryTask?.cancel()
@@ -504,6 +545,7 @@ final class CodexRealtimeVoiceCoordinator: NSObject {
         }
     }
     private func closePeer() {
+        resetAudioMeters()
         if let delegateProxy { RTCAudioSession.sharedInstance().remove(delegateProxy) }
         peer?.delegate = nil
         events?.delegate = nil
