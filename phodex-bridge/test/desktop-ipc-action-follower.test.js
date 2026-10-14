@@ -3866,6 +3866,87 @@ test("desktop IPC follower completes phone sandbox policies before Desktop handl
   assert.deepEqual(localForwards, [], "Desktop keeps its writer; no duplicate local dispatch");
 });
 
+for (const method of ["turn/start", "turn/steer"]) {
+  test(`desktop IPC follower completes phone text elements for ${method}`, async (t) => {
+    const transport = createFakeIpcTransport({
+      onRequest(frame, socket) {
+        if (frame.type !== "request") return;
+        emitFrame(socket, {
+          type: "response", requestId: frame.requestId, method: frame.method,
+          resultType: "success", handledByClientId: "desktop",
+          result: frame.method === "thread-owner-discovery"
+            ? { supportsUntrustedAppInput: true }
+            : frame.method === "thread-follower-start-turn"
+              ? { result: { turn: { id: "turn-text-elements" } } }
+              : frame.method === "thread-follower-steer-turn"
+                ? { result: { turnId: "turn-text-elements" } }
+                : { applied: true, revision: 1 },
+        });
+      },
+    });
+    const outbound = [];
+    let normalizedStartParams;
+    const follower = createDesktopIpcActionFollower({
+      socketPath: "/tmp/fake-remodex-text-elements.sock",
+      netModule: transport.netModule,
+      sendApplicationResponse(message) { outbound.push(JSON.parse(message)); },
+      normalizeTurnStartParams(params) { normalizedStartParams = params; return params; },
+    });
+    t.after(() => follower.stopAll());
+    const threadId = "thread-text-elements";
+    follower.observeInbound(JSON.stringify({ method: "thread/resume", params: { threadId } }));
+    await waitFor(() => transport.state.frames.some((frame) => frame.method === "initialize"));
+    emitFrame(transport.state.socket, {
+      type: "broadcast", method: "thread-stream-state-changed", sourceClientId: "desktop", version: 11,
+      params: {
+        conversationId: threadId,
+        change: { type: "snapshot", conversationState: {
+          cwd: "/repo", requests: [],
+          turns: [{ id: "turn-text-elements", status: method === "turn/steer" ? "inProgress" : "completed", items: [] }],
+        } },
+      },
+    });
+    await waitFor(() => follower.hasLiveThreadState(threadId));
+    const input = [
+      { type: "text", text: "continue from phone" },
+      { type: "text", text: "null spans", text_elements: null },
+      { type: "text", text: "invalid spans", text_elements: {} },
+      { type: "text", text: "  résumé  ", text_elements: [
+        { byteRange: { start: 2, end: 10 }, placeholder: "résumé" },
+      ] },
+      { type: "image", url: "data:image/png;base64,test" },
+      { type: "input_text", text: "legacy input" },
+    ];
+    const originalInput = structuredClone(input);
+    const params = {
+      threadId, input, clientUserMessageId: "phone-text-elements",
+      ...(method === "turn/steer" ? { expectedTurnId: "turn-text-elements" } : {}),
+    };
+    assert.equal(follower.observeInbound(JSON.stringify({ id: method, method, params })), true);
+    await waitFor(() => outbound.some((message) => message.id === method));
+    assert.equal(outbound.find((message) => message.id === method).error, undefined);
+    const ipcMethod = method === "turn/start" ? "thread-follower-start-turn" : "thread-follower-steer-turn";
+    const frames = transport.state.frames.filter((frame) => frame.method === ipcMethod);
+    assert.equal(frames.length, 1);
+    const desktopParams = method === "turn/start" ? frames[0].params.turnStart.request : frames[0].params;
+    // Desktop 26.1007 calls some() before app-server can default text_elements.
+    assert.doesNotThrow(() => desktopParams.input.some((entry) => entry.type === "text"
+      && entry.text_elements.some(({ placeholder }) => placeholder === "aeon-continuation")));
+    assert.deepEqual(desktopParams.input, [
+      ...originalInput.slice(0, 3).map((entry) => ({ ...entry, text_elements: [] })),
+      ...originalInput.slice(3),
+    ]);
+    assert.equal(desktopParams.clientUserMessageId, params.clientUserMessageId);
+    if (method === "turn/start") {
+      assert.deepEqual(normalizedStartParams.input, originalInput);
+    } else {
+      assert.equal(desktopParams.expectedTurnId, params.expectedTurnId);
+      assert.equal(desktopParams.restoreMessage.cwd, "/repo");
+    }
+    assert.deepEqual(input, originalInput);
+  });
+}
+
 test("desktop IPC follower normalizes phone turn starts before Desktop follower requests", async (t) => {
   const { tempDir, socketPath } = createIpcTestSocket("remodex-ipc-follower-normalize-");
   const serverFrames = [];
