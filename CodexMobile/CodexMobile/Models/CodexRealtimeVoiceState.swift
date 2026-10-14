@@ -50,10 +50,10 @@ nonisolated struct CodexRealtimeVoiceState: Equatable, Sendable {
     }
 
     enum ClosureDisposition: Equatable { case ignore, recover, end }
-    func closureDisposition(reason: String?, replacingSession: Bool) -> ClosureDisposition {
+    func closureDisposition(reason: String?, replacingSession: Bool, internalControlRecovery: Bool = false) -> ClosureDisposition {
         guard wantsActiveCall else { return .ignore }
         if replacingSession, phase == .recovering { return .ignore }
-        return reason == "transport_closed" ? .recover : .end
+        return reason == "transport_closed" || internalControlRecovery ? .recover : .end
     }
 
     mutating func connected() {

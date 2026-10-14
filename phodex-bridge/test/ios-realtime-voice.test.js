@@ -30,6 +30,8 @@ test("voice consumes canonical item events and generation-scoped SDP", () => {
   assert.ok(!service.includes('case "thread/realtime/transcript/delta"'));
   const call = read("Services/CodexRealtimeVoiceCoordinator.swift");
   assert.match(call, /remodexRealtimeSessionId/);
+  assert.match(call, /case "remodex\/realtime\/recovering"/);
+  assert.match(call, /data\?\["remodexRealtimeRecovery"\]\?\.stringValue == "controlLost"/);
   assert.match(call, /SecRandomCopyBytes/);
   assert.match(call, /String\(format: "%02x", \$0\)/);
   assert.ok(!call.includes("appendAudio") && !call.includes('method: "turn/start"'));

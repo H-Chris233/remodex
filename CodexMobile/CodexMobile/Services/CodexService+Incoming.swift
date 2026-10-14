@@ -175,7 +175,7 @@ extension CodexService {
 
     // Handles stream notifications to keep UI state in sync.
     func handleNotification(method: String, params: JSONValue?) {
-        if method.hasPrefix("thread/realtime/") {
+        if method.hasPrefix("thread/realtime/") || method == "remodex/realtime/recovering" {
             handleRealtimeVoiceNotification(method: method, params: params?.objectValue ?? [:])
             return
         }

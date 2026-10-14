@@ -31,6 +31,7 @@ final class CodexRealtimeVoiceCoordinator: NSObject {
     @ObservationIgnored private var hasRemoteDescription = false
     @ObservationIgnored private var isFinishing = false
     @ObservationIgnored private var isReplacingSession = false
+    @ObservationIgnored private var controlRecoveryHint = false
     @ObservationIgnored private var heartbeatTask: Task<Void, Never>?
     @ObservationIgnored private var recoveryTask: Task<Void, Never>?
     @ObservationIgnored private var operationExpiryTask: Task<Void, Never>?
@@ -163,6 +164,7 @@ final class CodexRealtimeVoiceCoordinator: NSObject {
         peerConnected = false
         peerFailed = false
         sessionClosed = false
+        controlRecoveryHint = false
         hasRemoteDescription = false
         let configuration = RTCConfiguration()
         configuration.sdpSemantics = .unifiedPlan
@@ -224,6 +226,10 @@ final class CodexRealtimeVoiceCoordinator: NSObject {
               params["remodexRealtimeSessionId"]?.stringValue == sessionID else { return }
         let generation = state.generation
         switch method {
+        case "remodex/realtime/recovering":
+            guard state.wantsActiveCall, params["remodexRealtimeRecovery"]?.stringValue == "controlLost" else { return }
+            controlRecoveryHint = true
+            beginRecovery()
         case "thread/realtime/sdp":
             guard state.wantsActiveCall, !hasRemoteDescription, let sdp = params["sdp"]?.stringValue, let peer else { return }
             peer.setRemoteDescription(RTCSessionDescription(type: .answer, sdp: sdp)) { [weak self] error in
@@ -241,7 +247,8 @@ final class CodexRealtimeVoiceCoordinator: NSObject {
             }
         case "thread/realtime/closed":
             sessionClosed = true
-            handleClosure(reason: params["reason"]?.stringValue)
+            controlRecoveryHint = params["remodexRealtimeRecovery"]?.stringValue == "controlLost"
+            handleClosure(reason: params["reason"]?.stringValue, internalControlRecovery: controlRecoveryHint)
         default: break
         }
     }
@@ -293,7 +300,8 @@ final class CodexRealtimeVoiceCoordinator: NSObject {
                     _ = try await codex.sendRequest(method: "remodex/realtime/heartbeat", params: self.credentials(), timeoutNanoseconds: 3_000_000_000)
                 } catch {
                     guard !Task.isCancelled else { return }
-                    self.beginRecovery()
+                    if self.isTransientTransportError(error) { self.beginRecovery() }
+                    else { await self.finish(error: error.localizedDescription) }
                 }
             }
         }
@@ -364,12 +372,6 @@ final class CodexRealtimeVoiceCoordinator: NSObject {
                     } else if self.state.mayRebuild(at: ProcessInfo.processInfo.systemUptime, hasFailed: self.peerFailed || self.sessionClosed) {
                         self.isReplacingSession = true
                         self.closePeer()
-                        do {
-                            _ = try await codex.sendRequest(method: "remodex/realtime/stop", params: self.credentials(), timeoutNanoseconds: 3_000_000_000)
-                        } catch CodexServiceError.rpcError(let error) where error.data?.objectValue?["errorCode"]?.stringValue == "closing" {
-                            // Stop is already queued; wait for the same owner to reach idle.
-                        }
-                        try self.checkIntent(generation)
                         try await self.waitForCleanedSession(generation: generation)
                         try self.checkIntent(generation)
                         guard self.state.rebuild(ifCleaned: true) else { throw CancellationError() }
@@ -400,7 +402,13 @@ final class CodexRealtimeVoiceCoordinator: NSObject {
         if let error = error as? CodexServiceError {
             switch error {
             case .disconnected: return true
-            case .rpcError(let rpcError): return rpcError.data?.objectValue?["errorCode"]?.stringValue == "control_unavailable"
+            case .rpcError(let rpcError):
+                let data = rpcError.data?.objectValue
+                if data?["errorCode"]?.stringValue == "closing", data?["remodexRealtimeRecovery"]?.stringValue == "controlLost" {
+                    controlRecoveryHint = true
+                    return true
+                }
+                return data?["errorCode"]?.stringValue == "control_unavailable"
             case .invalidInput(let message): return message.contains("timed out")
             default: return false
             }
@@ -410,6 +418,7 @@ final class CodexRealtimeVoiceCoordinator: NSObject {
 
     private func waitForCleanedSession(generation: Int) async throws {
         guard let codex, let threadID, let oldSession = sessionID else { throw CancellationError() }
+        var requestedStop = false
         while true {
             try checkIntent(generation)
             let result = try await codex.sendRequest(method: "remodex/realtime/status", params: .object(["threadId": .string(threadID)]), timeoutNanoseconds: 3_000_000_000).result?.objectValue
@@ -417,12 +426,20 @@ final class CodexRealtimeVoiceCoordinator: NSObject {
             if result?["state"]?.stringValue == "idle", result?["realtimeSessionId"]?.stringValue == nil { return }
             guard result?["realtimeSessionId"]?.stringValue == oldSession else { throw CodexServiceError.invalidInput("Another voice session replaced this call. Start a new call manually.") }
             if result?["state"]?.stringValue == "poisoned" { throw CodexServiceError.invalidInput("The paired bridge could not close its old voice session. Restart the bridge before calling again.") }
+            // An internal control-recovery stop may already be queued or finished.
+            if result?["state"]?.stringValue != "closing", !requestedStop {
+                do {
+                    _ = try await codex.sendRequest(method: "remodex/realtime/stop", params: credentials(), timeoutNanoseconds: 3_000_000_000)
+                } catch CodexServiceError.rpcError(let error) where error.data?.objectValue?["errorCode"]?.stringValue == "closing" {}
+                try checkIntent(generation)
+                requestedStop = true
+            }
             try await Task.sleep(for: .milliseconds(200))
         }
     }
 
-    private func handleClosure(reason: String?) {
-        switch state.closureDisposition(reason: reason, replacingSession: isReplacingSession) {
+    private func handleClosure(reason: String?, internalControlRecovery: Bool = false) {
+        switch state.closureDisposition(reason: reason, replacingSession: isReplacingSession, internalControlRecovery: internalControlRecovery) {
         case .ignore: break
         case .recover: beginRecovery()
         case .end: end(graceful: false)
@@ -466,6 +483,7 @@ final class CodexRealtimeVoiceCoordinator: NSObject {
         sessionID = nil
         leaseToken = nil
         isReplacingSession = false
+        controlRecoveryHint = false
         if let owner = audioOwner {
             VoiceAudioSessionOwnership.release(owner) {
                 let audio = RTCAudioSession.sharedInstance()
@@ -547,7 +565,7 @@ final class CodexRealtimeVoiceCoordinator: NSObject {
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
         if object["type"] as? String == "session.closed" {
             sessionClosed = true
-            handleClosure(reason: nil)
+            handleClosure(reason: nil, internalControlRecovery: controlRecoveryHint)
         }
     }
 }
