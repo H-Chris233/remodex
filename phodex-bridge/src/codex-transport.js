@@ -307,30 +307,55 @@ function shouldRetryLaunchError(error, launchIndex, launchPlans) {
 }
 
 function createWebSocketTransport({ endpoint, WebSocketImpl = WebSocket }) {
-  const socket = new WebSocketImpl(endpoint);
   const listeners = createListenerBag();
   const openState = WebSocketImpl.OPEN ?? WebSocket.OPEN ?? 1;
   const connectingState = WebSocketImpl.CONNECTING ?? WebSocket.CONNECTING ?? 0;
+  let socket = null;
+  let retryTimer = null;
+  let hasOpened = false;
+  let stopped = false;
+  let lastError = null;
+  // Login services start independently; wait for the shared runtime without replaying requests.
+  const startupTimer = setTimeout(() => {
+    if (hasOpened || stopped) return;
+    stopped = true;
+    clearTimeout(retryTimer);
+    socket?.close();
+    listeners.emitError(lastError || new Error("Codex endpoint did not become ready within 30 seconds."));
+  }, 30_000);
+  startupTimer.unref?.();
 
-  socket.on("message", (chunk) => {
-    const message = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-    if (message.trim()) {
-      listeners.emitMessage(message);
-    }
-  });
-  socket.on("open", () => {
-    listeners.emitStarted({
-      mode: "websocket",
-      launchDescription: endpoint,
+  function connect() {
+    if (stopped) return;
+    const nextSocket = new WebSocketImpl(endpoint);
+    socket = nextSocket;
+    nextSocket.on("message", (chunk) => {
+      if (socket !== nextSocket || stopped) return;
+      const message = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+      if (message.trim()) listeners.emitMessage(message);
     });
-  });
-
-  socket.on("close", (code, reason) => {
-    const safeReason = reason ? reason.toString("utf8") : "no reason";
-    listeners.emitClose(code, safeReason);
-  });
-
-  socket.on("error", (error) => listeners.emitError(error));
+    nextSocket.on("open", () => {
+      if (socket !== nextSocket || stopped) return;
+      hasOpened = true;
+      clearTimeout(startupTimer);
+      listeners.emitStarted({ mode: "websocket", launchDescription: endpoint });
+    });
+    nextSocket.on("close", (code, reason) => {
+      if (socket !== nextSocket || stopped) return;
+      if (!hasOpened) {
+        retryTimer = setTimeout(connect, 250);
+        retryTimer.unref?.();
+        return;
+      }
+      listeners.emitClose(code, reason ? reason.toString("utf8") : "no reason");
+    });
+    nextSocket.on("error", (error) => {
+      if (socket !== nextSocket || stopped) return;
+      lastError = error;
+      if (hasOpened) listeners.emitError(error);
+    });
+  }
+  connect();
 
   return {
     mode: "websocket",
@@ -355,6 +380,9 @@ function createWebSocketTransport({ endpoint, WebSocketImpl = WebSocket }) {
       listeners.onStarted = handler;
     },
     shutdown() {
+      stopped = true;
+      clearTimeout(startupTimer);
+      clearTimeout(retryTimer);
       if (socket.readyState === openState || socket.readyState === connectingState) {
         socket.close();
       }

@@ -714,6 +714,11 @@ function alignThreadTurnsListResponseToAnchor(response, anchorTurnId) {
   };
 }
 
+function isRealtimeMethod(method) {
+  return typeof method === "string"
+    && (method.startsWith("thread/realtime/") || method.startsWith("remodex/realtime/"));
+}
+
 function startBridge({
   config: explicitConfig = null,
   printPairingQr = true,
@@ -787,9 +792,12 @@ function startBridge({
   let relayWatchdog = null;
   let lastRelayActivityAt = 0;
   let lastConnectionStatus = null;
-  let codexLaunchState = config.codexEndpoint ? "connected" : "starting";
-  let codexHandshakeState = config.codexEndpoint ? "warm" : "cold";
+  let codexLaunchState = "starting";
+  let codexHandshakeState = "cold";
+  let codexInitializeResult = null;
+  let codexInitializedNotificationForwarded = false;
   const forwardedInitializeRequestIds = new Set();
+  const realtimeRequestIds = new Map();
   const bridgeManagedCodexRequestWaiters = new Map();
   const forwardedRequestMethodsById = new Map();
   const pendingLocalThreadCreationRequestsById = new Map();
@@ -1041,6 +1049,7 @@ function startBridge({
   // Marks the local Codex runtime as launchable before relay/network recovery updates.
   codex.onStarted(() => {
     codexLaunchState = "connected";
+    if (config.codexEndpoint && !isShuttingDown) connectRelay();
     const lastPublishedBridgeStatus = bridgeStatusPublisher.latest();
     if (!lastPublishedBridgeStatus) {
       return;
@@ -1259,7 +1268,7 @@ function startBridge({
     printQR(pairingSession);
   }
   pushServiceClient.logUnavailable();
-  connectRelay();
+  if (!config.codexEndpoint) connectRelay();
 
   codex.onMessage((message) => {
     // Streaming deltas make this the hottest path in the bridge: parse the
@@ -1333,6 +1342,25 @@ function startBridge({
     const parsedMessage = parseBridgeMessage(rawMessage);
     // Register history/list response shaping before either runtime can reply.
     rememberForwardedRequestMethod(rawMessage);
+    if (isRealtimeMethod(parsedMessage?.method)) {
+      if (parsedMessage.id != null) {
+        realtimeRequestIds.set(String(parsedMessage.id), Date.now());
+        evictOldestEntries(realtimeRequestIds, FORWARDED_REQUEST_METHODS_MAX_SIZE);
+      }
+      if (!config.codexEndpoint) {
+        if (parsedMessage.id != null) {
+          sendApplicationResponse(JSON.stringify({
+            id: parsedMessage.id,
+            ...(parsedMessage.method === "remodex/realtime/status"
+              ? { result: { supported: false, protocolVersion: 1, state: "unavailable" } }
+              : { error: { code: -32001, message: "Set up the shared Codex runtime before starting a voice call." } }),
+          }));
+        }
+        return;
+      }
+      forwardInboundRequestToCodex(rawMessage);
+      return;
+    }
     if (parsedMessage?.method === "thread/list"
       && typeof parsedMessage.params?.cursor === "string"
       && parsedMessage.params.cursor.startsWith(OPEN_CODE_THREAD_LIST_CURSOR_PREFIX)) {
@@ -1570,8 +1598,14 @@ function startBridge({
     pushNotificationTracker.handleOutbound(rawMessage, outboundMessage);
     const responseId = outboundMessage?.id;
     const requestKey = responseId == null ? "" : String(responseId);
+    const isTransient = isRealtimeMethod(outboundMessage?.method)
+      || realtimeRequestIds.delete(requestKey);
     const listRequest = pendingOpenCodeThreadListRequests.get(requestKey);
     const sanitizedMessage = sanitizeRelayBoundCodexMessage(rawMessage, outboundMessage);
+    if (isTransient) {
+      secureTransport.sendTransientApplicationMessage(sanitizedMessage, sendRelayWireMessage);
+      return;
+    }
     if (!listRequest || !sanitizedMessage) {
       secureTransport.queueOutboundApplicationMessage(sanitizedMessage, sendRelayWireMessage);
       return;
@@ -2100,6 +2134,9 @@ function startBridge({
   }
 
   function pruneExpiredForwardedRequestMethods(now = Date.now()) {
+    for (const [requestId, createdAt] of realtimeRequestIds) {
+      if (now - createdAt >= forwardedRequestMethodTTLms) realtimeRequestIds.delete(requestId);
+    }
     const expiredForwarded = [];
     for (const [requestId, trackedRequest] of forwardedRequestMethodsById.entries()) {
       if (!trackedRequest || (now - trackedRequest.createdAt) >= forwardedRequestMethodTTLms) {
@@ -2243,6 +2280,7 @@ function startBridge({
       sendResponse(JSON.stringify({
         id: parsed.id,
         result: {
+          ...codexInitializeResult,
           bridgeManaged: true,
           remodexRuntimeSettingsVersion: 2,
         },
@@ -2251,7 +2289,9 @@ function startBridge({
     }
 
     if (method === "initialized") {
-      return codexHandshakeState === "warm";
+      if (codexInitializedNotificationForwarded) return true;
+      codexInitializedNotificationForwarded = true;
+      return false;
     }
 
     return false;
@@ -2342,6 +2382,7 @@ function startBridge({
 
     if (parsed?.result != null) {
       codexHandshakeState = "warm";
+      codexInitializeResult = parsed.result;
       return;
     }
 

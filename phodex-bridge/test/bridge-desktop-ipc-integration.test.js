@@ -1667,9 +1667,67 @@ test("bridge-generated lifecycle notifications reach completion tracking", async
     .map(({ params }) => params), [{ threadId: "thread-ambiguous-push", includeTurns: true }]);
 });
 
+test("shared endpoint performs a real handshake and keeps realtime traffic out of replay", async (t) => {
+  const relayServer = new WebSocket.Server({ port: 0 });
+  const messages = [];
+  const buffered = [];
+  const transient = [];
+  let relaySocket;
+  let fakeCodex;
+  let bridge;
+  t.after(() => { bridge?.stop(); relaySocket?.close(); relayServer.close(); });
+  await new Promise((resolve) => relayServer.once("listening", resolve));
+  relayServer.on("connection", (socket) => {
+    relaySocket = socket;
+    socket.on("message", (data) => messages.push(JSON.parse(data.toString("utf8"))));
+  });
+  const { startBridge } = loadBridgeWithTestDoubles({
+    createCodexTransportImpl() { fakeCodex = createFakeCodexTransport(); return fakeCodex; },
+    createBridgeSecureTransportImpl() {
+      return {
+        ...createPlaintextSecureTransport(),
+        queueOutboundApplicationMessage(message, send) { buffered.push(JSON.parse(message)); send(message); },
+        sendTransientApplicationMessage(message, send) { transient.push(JSON.parse(message)); send(message); },
+      };
+    },
+  });
+  bridge = startBridge({
+    printPairingQr: false,
+    config: bridgeTestConfig(relayServer, { codexEndpoint: "ws://127.0.0.1:4510" }),
+  });
+  await waitFor(() => relaySocket?.readyState === WebSocket.OPEN);
+  const initialize = (id) => JSON.stringify({
+    id, method: "initialize", params: { clientInfo: { name: "voice_test", version: "1" }, capabilities: { experimentalApi: true } },
+  });
+  relaySocket.send(initialize("first-init"));
+  await waitFor(() => fakeCodex.sent.some((message) => message.id === "first-init"));
+  assert.equal(messages.some((message) => message.id === "first-init"), false);
+  fakeCodex.emitMessage({ id: "first-init", result: { userAgent: "codex/0.162.1", platformOs: "windows", futureCapability: true } });
+  await waitForMessage(messages, (message) => message.id === "first-init");
+  relaySocket.send(JSON.stringify({ method: "initialized" }));
+  await waitFor(() => fakeCodex.sent.some((message) => message.method === "initialized"));
+  relaySocket.send(initialize("warm-init"));
+  const warm = await waitForMessage(messages, (message) => message.id === "warm-init");
+  assert.equal(warm.result.userAgent, "codex/0.162.1");
+  assert.equal(warm.result.futureCapability, true);
+  assert.equal(fakeCodex.sent.filter((message) => message.method === "initialize").length, 1);
+
+  relaySocket.send(JSON.stringify({ id: "heartbeat", method: "remodex/realtime/heartbeat", params: { threadId: "task" } }));
+  await waitFor(() => fakeCodex.sent.some((message) => message.id === "heartbeat"));
+  fakeCodex.emitMessage({ id: "heartbeat", result: {} });
+  fakeCodex.emitMessage({ method: "thread/realtime/sdp", params: { threadId: "task", sdp: "answer" } });
+  fakeCodex.emitMessage({ method: "turn/completed", params: { threadId: "task", turnId: "turn" } });
+  await waitForMessage(messages, (message) => message.method === "turn/completed");
+  assert.ok(transient.some((message) => message.id === "heartbeat"));
+  assert.ok(transient.some((message) => message.method === "thread/realtime/sdp"));
+  assert.equal(buffered.some((message) => message.id === "heartbeat" || message.method === "thread/realtime/sdp"), false);
+  assert.ok(buffered.some((message) => message.method === "turn/completed"));
+});
+
 // Loads bridge.js with plaintext test transports while leaving the production module untouched.
 function loadBridgeWithTestDoubles({
   createCodexTransportImpl,
+  createBridgeSecureTransportImpl = createPlaintextSecureTransport,
   createOpenCodeRuntimeImpl = null,
   desktopIpcActionFollowerModule = null,
   desktopIpcLiveOwnerModule = null,
@@ -1699,7 +1757,7 @@ function loadBridgeWithTestDoubles({
       return desktopIpcLiveOwnerModule;
     }
     if (parent?.filename === bridgePath && request === "./secure-transport") {
-      return { createBridgeSecureTransport: createPlaintextSecureTransport };
+      return { createBridgeSecureTransport: createBridgeSecureTransportImpl };
     }
     if (parent?.filename === bridgePath && request === "./secure-device-state") {
       return createSecureDeviceStateDouble();
@@ -1735,6 +1793,9 @@ function createPlaintextSecureTransport() {
       return true;
     },
     queueOutboundApplicationMessage(message, sendWireMessage) {
+      sendWireMessage(message);
+    },
+    sendTransientApplicationMessage(message, sendWireMessage) {
       sendWireMessage(message);
     },
   };

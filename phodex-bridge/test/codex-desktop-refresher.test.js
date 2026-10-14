@@ -32,6 +32,22 @@ async function waitFor(predicate, timeoutMs = 500) {
   return predicate();
 }
 
+test("shared runtime endpoint survives restart and explicit endpoint configuration wins", () => {
+  const stateDir = path.join(os.tmpdir(), "remodex-voice-config-test");
+  const configPath = path.join(stateDir, "daemon-config.json");
+  const options = {
+    env: { REMODEX_DEVICE_STATE_DIR: stateDir },
+    fsImpl: {
+      existsSync: (file) => file === configPath,
+      readFileSync: () => JSON.stringify({ codexEndpoint: "ws://127.0.0.1:4510" }),
+    },
+  };
+  assert.equal(readBridgeConfig(options).codexEndpoint, "ws://127.0.0.1:4510");
+  assert.equal(readBridgeConfig({ ...options, env: {
+    ...options.env, REMODEX_CODEX_ENDPOINT: "ws://127.0.0.1:4520",
+  } }).codexEndpoint, "ws://127.0.0.1:4520");
+});
+
 test("readBridgeConfig keeps safe defaults and explicit overrides", () => {
   const macConfig = readBridgeConfig({
     env: {},

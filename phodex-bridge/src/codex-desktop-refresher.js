@@ -719,7 +719,7 @@ function readBridgeConfig({
     : privateDefaults.pushServiceUrl;
   const codexEndpoint = readFirstDefinedEnv(
     ["REMODEX_CODEX_ENDPOINT", "PHODEX_CODEX_ENDPOINT"],
-    "",
+    typeof daemonConfig.codexEndpoint === "string" ? daemonConfig.codexEndpoint.trim() : "",
     env
   );
   const refreshCommand = readFirstDefinedEnv(

@@ -99,6 +99,33 @@ test("endpoint transport only sends outbound messages after the websocket opens"
   assert.deepEqual(socket.sentMessages, ['{"id":"list-2","method":"thread/list"}']);
 });
 
+test("endpoint startup waits for the independent runtime and ignores retired sockets", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const transport = createCodexTransport({ endpoint: "ws://127.0.0.1:4510", WebSocketImpl: FakeWebSocket });
+  const errors = [];
+  const messages = [];
+  let started = 0;
+  transport.onError((error) => errors.push(error));
+  transport.onMessage((message) => messages.push(message));
+  transport.onStarted(() => { started += 1; });
+  const first = FakeWebSocket.latestInstance;
+  first.emit("error", new Error("ECONNREFUSED"));
+  first.emit("close", 1006);
+  assert.equal(errors.length, 0);
+  t.mock.timers.tick(250);
+  const second = FakeWebSocket.latestInstance;
+  assert.notEqual(second, first);
+  second.readyState = FakeWebSocket.OPEN;
+  second.emit("open");
+  first.emit("message", "stale");
+  second.emit("message", "current");
+  t.mock.timers.tick(30_000);
+  assert.equal(started, 1);
+  assert.deepEqual(messages, ["current"]);
+  assert.equal(errors.length, 0);
+  transport.shutdown();
+});
+
 test("spawn launch plans add the bundled Codex app binary as a fallback on macOS", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-codex-app-"));
   const appPath = path.join(tempDir, "Codex.app");

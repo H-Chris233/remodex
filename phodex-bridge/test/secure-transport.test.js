@@ -35,6 +35,56 @@ function createTestBridgeSecureTransport(options) {
   });
 }
 
+test("realtime messages stay encrypted without displacing or replaying task history", () => {
+  const macIdentity = createOkpKeyPair("ed25519");
+  const phoneIdentity = createOkpKeyPair("ed25519");
+  const context = { sessionId: "voice-session", macDeviceId: "voice-mac", phoneDeviceId: "voice-phone" };
+  const secureTransport = createTestBridgeSecureTransport({
+    sessionId: context.sessionId,
+    relayUrl: "wss://relay.example/relay",
+    deviceState: {
+      macDeviceId: context.macDeviceId,
+      macIdentityPrivateKey: macIdentity.privateKey,
+      macIdentityPublicKey: macIdentity.publicKey,
+      trustedPhones: {},
+    },
+  });
+  const wire = [];
+  const send = (message) => { wire.push(message); return true; };
+  secureTransport.bindLiveSendWireMessage(send);
+  assert.equal(secureTransport.sendTransientApplicationMessage('{"method":"thread/realtime/started"}', send), false);
+  const phoneEphemeral = createOkpKeyPair("x25519");
+  const handshake = finishHandshake({
+    ...context, secureTransport, macIdentity, phoneIdentity, phoneEphemeral,
+    handshakeMode: HANDSHAKE_MODE_QR_BOOTSTRAP, lastAppliedBridgeOutboundSeq: 0,
+  });
+  const key = deriveMacToPhoneKey({ ...context, phoneEphemeral, ...handshake });
+  secureTransport.queueOutboundApplicationMessage('{"method":"turn/started","params":{"threadId":"task"}}', send);
+  for (let i = 0; i < 600; i += 1) {
+    assert.equal(secureTransport.sendTransientApplicationMessage(
+      JSON.stringify({ method: "thread/realtime/item/transcript/delta", params: { delta: `caption ${i}` } }), send
+    ), true);
+  }
+  secureTransport.queueOutboundApplicationMessage('{"method":"turn/completed","params":{"threadId":"task"}}', send);
+  const live = wire.map((message) => decryptEnvelope(JSON.parse(message), key));
+  assert.equal(live[0].bridgeOutboundSeq, 1);
+  assert.equal(live[1].bridgeOutboundSeq, undefined);
+  assert.equal(JSON.parse(live[1].payloadText).params.delta, "caption 0");
+  assert.equal(live.at(-1).bridgeOutboundSeq, 2);
+
+  wire.length = 0;
+  const reconnectEphemeral = createOkpKeyPair("x25519");
+  const reconnect = finishHandshake({
+    ...context, secureTransport, macIdentity, phoneIdentity, phoneEphemeral: reconnectEphemeral,
+    handshakeMode: HANDSHAKE_MODE_TRUSTED_RECONNECT, lastAppliedBridgeOutboundSeq: 0,
+  });
+  const replayKey = deriveMacToPhoneKey({ ...context, phoneEphemeral: reconnectEphemeral, ...reconnect });
+  const replay = wire.map((message) => JSON.parse(decryptEnvelope(JSON.parse(message), replayKey).payloadText));
+  assert.deepEqual(replay.map((message) => message.method), [
+    "turn/started", "turn/completed", "remodex/bufferedReplay/completed",
+  ]);
+});
+
 test("secure transport rejects plaintext JSON-RPC before the secure handshake", () => {
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
   const privateJwk = privateKey.export({ format: "jwk" });

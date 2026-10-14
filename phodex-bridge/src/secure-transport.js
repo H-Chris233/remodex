@@ -150,6 +150,16 @@ function createBridgeSecureTransport({
     return Boolean(activeSession?.isResumed);
   }
 
+  // Realtime signalling belongs to the current call and must never reappear during catch-up.
+  function sendTransientApplicationMessage(payloadText, sendWireMessage) {
+    const normalizedPayload = normalizeNonEmptyString(payloadText);
+    if (!normalizedPayload) return false;
+    return sendBufferedEntry(
+      { payloadText: normalizedPayload },
+      activeSession?.sendWireMessage || sendWireMessage
+    );
+  }
+
   function handleClientHello(message, sendControlMessage) {
     const protocolVersion = Number(message.protocolVersion);
     const incomingSessionId = normalizeNonEmptyString(message.sessionId);
@@ -940,6 +950,7 @@ function createBridgeSecureTransport({
     handleIncomingWireMessage,
     isSecureChannelReady,
     queueOutboundApplicationMessage,
+    sendTransientApplicationMessage,
   };
 }
 
