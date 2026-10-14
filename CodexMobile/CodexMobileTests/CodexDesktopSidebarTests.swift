@@ -58,6 +58,72 @@ final class CodexDesktopSidebarTests: XCTestCase {
         XCTAssertEqual(choices.first { $0.id == "desktop:saved" }?.projectPath, "/work/repo")
     }
 
+    func testProjectSectionsCollectUnassignedCatalogAndFallbackDirectories() {
+        let desktop = snapshot()
+        let rows = [
+            CodexThread(id: "fallback", cwd: #"C:\Users\me\scratch"#),
+            CodexThread(id: "rootless"),
+            CodexThread(id: "pinned", cwd: "/work/repo"),
+        ]
+        let groups = SidebarThreadGrouping.makeGroups(from: rows, pinnedThreadIDs: ["pinned"], desktopSnapshot: desktop)
+        let sections = SidebarThreadGrouping.makeProjectSections(from: groups, desktopSections: desktop.sections)
+
+        XCTAssertEqual(sections.map(\.label), ["Work", "其他"])
+        XCTAssertEqual(sections[0].groups.map(\.id), ["desktop:saved"])
+        XCTAssertEqual(sections[1].id, SidebarThreadGrouping.otherProjectSectionID)
+        XCTAssertEqual(Set(sections[1].groups.map(\.id)), ["desktop:other", #"project:C:\Users\me\scratch"#])
+        XCTAssertEqual(sections.flatMap(\.groups).count, groups.filter { $0.kind == .project }.count)
+        XCTAssertTrue(sections.flatMap(\.groups).allSatisfy { $0.kind == .project })
+    }
+
+    func testProjectSectionsPreserveDesktopOrderAndHideEmptySections() {
+        let groups = SidebarThreadGrouping.makeGroups(from: [], scope: .projects, desktopSnapshot: snapshot())
+        let desktopSections = [
+            CodexDesktopSidebarSection(id: "empty", name: "Empty", projectIds: ["missing"]),
+            CodexDesktopSidebarSection(id: "second", name: "Second", projectIds: ["other", "saved"]),
+        ]
+        let sections = SidebarThreadGrouping.makeProjectSections(from: groups, desktopSections: desktopSections)
+        XCTAssertEqual(sections.map(\.id), ["second"])
+        XCTAssertEqual(sections[0].groups.map(\.id), ["desktop:other", "desktop:saved"])
+
+        let filtered = groups.filter { $0.id == "desktop:saved" }
+        let filteredSections = SidebarThreadGrouping.makeProjectSections(from: filtered, desktopSections: snapshot().sections)
+        XCTAssertEqual(filteredSections.map(\.id), ["section"])
+        XCTAssertEqual(filteredSections[0].groups.map(\.id), ["desktop:saved"])
+    }
+
+    func testProjectSectionsWithoutCatalogUseOtherOnlyForDirectories() {
+        let groups = SidebarThreadGrouping.makeGroups(from: [
+            CodexThread(id: "local", cwd: "/work/local"),
+            CodexThread(id: "chat"),
+        ])
+        let sections = SidebarThreadGrouping.makeProjectSections(from: groups)
+        XCTAssertEqual(sections.map(\.id), [SidebarThreadGrouping.otherProjectSectionID])
+        XCTAssertEqual(sections[0].groups.flatMap(\.threads).map(\.id), ["local"])
+        XCTAssertTrue(SidebarThreadGrouping.makeProjectSections(from: groups.filter { $0.kind == .chat }).isEmpty)
+        XCTAssertTrue(SidebarThreadGrouping.makeProjectSections(from: []).isEmpty)
+    }
+
+    func testProjectAndSectionBadgesIncludePinnedSubagentsAndIgnoreArchivedRuns() {
+        let rows = [
+            CodexThread(id: "root", cwd: "/work/repo"),
+            CodexThread(id: "child", cwd: "/work/repo", parentThreadId: "root"),
+            CodexThread(id: "idle", cwd: "/work/repo"),
+            CodexThread(id: "archived", cwd: "/work/other", syncState: .archivedLocal),
+        ]
+        let groups = SidebarThreadGrouping.makeGroups(
+            from: rows, pinnedThreadIDs: ["root"], desktopSnapshot: snapshot(),
+            runBadgeStateByThreadID: ["child": .running, "idle": .waitingOnUser, "archived": .running]
+        )
+        XCTAssertEqual(groups.first { $0.kind == .pinned }?.runBadgeState, .running)
+        let project = groups.first { $0.id == "desktop:saved" }!
+        XCTAssertEqual(project.threads.map(\.id), ["idle"])
+        XCTAssertEqual(project.runBadgeState, .running)
+        XCTAssertNil(groups.first { $0.id == "desktop:other" }?.runBadgeState)
+        let sections = SidebarThreadGrouping.makeProjectSections(from: groups, desktopSections: snapshot().sections)
+        XCTAssertEqual(SidebarThreadGrouping.aggregateRunBadgeState(sections[0].groups.compactMap(\.runBadgeState)), .running)
+    }
+
     func testMembershipPrecedenceAndWorktreesDoNotRewriteCwd() {
         let desktop = snapshot()
         XCTAssertEqual(desktop.project(for: CodexThread(id: "moved", cwd: "/work/repo"))?.id, "other")
@@ -115,10 +181,10 @@ final class CodexDesktopSidebarTests: XCTestCase {
         service.requestTransportOverride = { [self] _, _ in try response(snapshot()) }
         await service.refreshDesktopSidebar(force: true)
         XCTAssertTrue(service.desktopCollapsedProjectIDs.contains("desktop:saved"))
-        service.setDesktopCollapsedSections(["section"])
+        service.setDesktopCollapsedSections(["section", SidebarThreadGrouping.otherProjectSectionID])
         service.loadDesktopSidebarCache(for: service.currentMacScopedPersistenceDeviceId)
         XCTAssertEqual(service.desktopSidebarSnapshot?.scopeKey, "account-a")
-        XCTAssertEqual(service.desktopCollapsedSectionIDs, ["section"])
+        XCTAssertEqual(service.desktopCollapsedSectionIDs, ["section", SidebarThreadGrouping.otherProjectSectionID])
         service.loadDesktopSidebarCache(for: "different-computer")
         XCTAssertNil(service.desktopSidebarSnapshot)
     }

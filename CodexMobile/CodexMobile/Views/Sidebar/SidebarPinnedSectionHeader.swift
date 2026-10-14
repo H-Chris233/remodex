@@ -13,11 +13,13 @@ import SwiftUI
 struct SidebarPinnedSectionHeader: View {
     let label: String
     let isExpanded: Bool
+    var runBadgeState: CodexThreadRunBadgeState? = nil
     let onToggle: () -> Void
 
     var body: some View {
         SidebarSectionHeader(
             label: label,
+            runBadgeState: runBadgeState,
             verticalPadding: (top: 10, bottom: 0),
             onToggle: onToggle,
             leadingIcon: {
