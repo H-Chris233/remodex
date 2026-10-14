@@ -16,7 +16,8 @@ $workerRecord = Join-Path $StateDir $(if ($WorkerKind -eq 'bridge') { 'windows-w
 if ($Action -eq 'Run') {
     $env:REMODEX_DEVICE_STATE_DIR = $StateDir
     $configFile = if ($WorkerKind -eq 'bridge') { 'daemon-config.json' } else { 'voice-runtime-config.json' }
-    $config = Get-Content -LiteralPath (Join-Path $StateDir $configFile) -Raw -Encoding UTF8 | ConvertFrom-Json
+    try { $config = Get-Content -LiteralPath (Join-Path $StateDir $configFile) -Raw -Encoding UTF8 | ConvertFrom-Json }
+    catch { throw 'Unable to read the worker configuration. Run its setup command again.' }
     foreach ($file in @($config.nodePath, $config.cliPath, $config.codexPath)) {
         if (-not $file -or -not (Test-Path -LiteralPath $file -PathType Leaf)) {
             throw 'A recorded executable or checkout no longer exists. Run remodex start to reinstall the task.'

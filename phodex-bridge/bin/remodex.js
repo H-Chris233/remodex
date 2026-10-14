@@ -408,6 +408,10 @@ function sanitizeDaemonConfigForOutput(config) {
     return config || null;
   }
   const { relayUrl, pushServiceUrl, ...rest } = config;
+  if (rest.codexEndpoint) {
+    try { rest.codexEndpoint = new URL(rest.codexEndpoint).origin; }
+    catch { rest.codexEndpoint = "configured"; }
+  }
   return {
     ...rest,
     relayConfigured: Boolean(relayUrl),

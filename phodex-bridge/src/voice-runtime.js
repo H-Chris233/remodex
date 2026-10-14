@@ -4,6 +4,7 @@ const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn, execFileSync } = require("node:child_process");
+const { createHash } = require("node:crypto");
 const WebSocket = require("ws");
 const state = require("./daemon-state");
 const { version } = require("../package.json");
@@ -14,7 +15,14 @@ const runtimePath = (name, options = {}) => path.join(state.resolveRemodexStateD
 
 function readRuntimeConfig(options = {}) {
   const file = runtimePath("voice-runtime-config.json", options);
-  return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : null;
+  if (!fs.existsSync(file)) return null;
+  try { return JSON.parse(fs.readFileSync(file, "utf8")); }
+  catch { throw new Error("The Voice runtime configuration is invalid. Run setup-voice again."); }
+}
+
+function resolveVoiceEndpoint(config) {
+  if (!/^[0-9a-f]{64}$/.test(config?.gatewayToken || "")) throw new Error("The Voice gateway credential is missing or invalid. Run setup-voice again.");
+  return `${VOICE_ENDPOINT}/voice/${config.gatewayToken}`;
 }
 
 function readRuntimeStatus(options = {}) {
@@ -36,8 +44,8 @@ function assertPortAvailable(port) {
 }
 
 // A connection is initialized separately; probing never creates a thread or sends a turn.
-async function withRuntimeClient(endpoint, operation, { WebSocketImpl = WebSocket, timeoutMs = 5000 } = {}) {
-  const socket = new WebSocketImpl(endpoint);
+async function withRuntimeClient(endpoint, operation, { WebSocketImpl = WebSocket, timeoutMs = 5000, nativeToken = "" } = {}) {
+  const socket = new WebSocketImpl(endpoint, nativeToken ? { headers: { Authorization: `Bearer ${nativeToken}` } } : {});
   const pending = new Map();
   let nextId = 0;
   socket.on("message", (bytes) => {
@@ -83,15 +91,17 @@ async function withRuntimeClient(endpoint, operation, { WebSocketImpl = WebSocke
   }
 }
 
-function probeRuntime(endpoint = VOICE_ENDPOINT, options = {}) {
+function probeRuntime(endpoint, options = {}) {
+  endpoint ||= resolveVoiceEndpoint(options.config || readRuntimeConfig(options));
   return withRuntimeClient(endpoint, async (request) => {
     const loaded = await request("thread/loaded/list", {});
-    return { endpoint, threadIds: loaded.data || [] };
+    return { endpoint: new URL(endpoint).origin, threadIds: loaded.data || [] };
   }, options);
 }
 
 async function assertRuntimeIdle(options = {}) {
-  return withRuntimeClient(VOICE_ENDPOINT, async (request) => {
+  const endpoint = resolveVoiceEndpoint(options.config || readRuntimeConfig(options));
+  return withRuntimeClient(endpoint, async (request) => {
     const voice = await request("remodex/realtime/status", {});
     if (voice?.state !== "idle") throw new Error("A Voice call is active or closing. Hang up and wait for cleanup before stopping the shared runtime.");
     let cursor;
@@ -112,11 +122,15 @@ async function assertRuntimeIdle(options = {}) {
 function buildRuntimeLaunch(config, env = process.env, platform = process.platform) {
   if (!config?.codexPath || !path.isAbsolute(config.codexPath) || !fs.existsSync(config.codexPath)
       || /["\r\n%]/.test(config.codexPath)) throw new Error("The recorded Codex executable no longer exists. Run remodex setup-voice again.");
+  resolveVoiceEndpoint(config);
+  if (!/^[0-9a-f]{64}$/.test(config.nativeToken || "")) throw new Error("The native Voice runtime credential is missing or invalid. Run setup-voice again.");
+  const nativeTokenHash = createHash("sha256").update(config.nativeToken).digest("hex");
   const childEnv = { ...env, CODEX_HOME: config.codexHome || env.CODEX_HOME || path.join(os.homedir(), ".codex") };
-  const args = ["app-server", "--listen", CODEX_ENDPOINT, "--enable", "realtime_conversation", "-c", 'realtime.type="conversational"'];
+  const args = ["app-server", "--listen", CODEX_ENDPOINT, "--enable", "realtime_conversation", "-c", 'realtime.type="conversational"',
+    "--ws-auth", "capability-token", "--ws-token-sha256", nativeTokenHash];
   if (platform === "win32" && /\.cmd$/i.test(config.codexPath)) {
     return { command: env.ComSpec || "cmd.exe", args: ["/d", "/s", "/v:off", "/c",
-      `""${config.codexPath}" app-server --listen ${CODEX_ENDPOINT} --enable realtime_conversation -c realtime.type=conversational"`],
+      `""${config.codexPath}" app-server --listen ${CODEX_ENDPOINT} --enable realtime_conversation -c realtime.type=conversational --ws-auth capability-token --ws-token-sha256 ${nativeTokenHash}"`],
     options: { env: childEnv, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, windowsVerbatimArguments: true } };
   }
   return { command: config.codexPath, args, options: { env: childEnv, stdio: ["ignore", "pipe", "pipe"], windowsHide: true } };
@@ -165,11 +179,12 @@ function createVoiceRuntime({ config, env = process.env, platform = process.plat
   return {
     async start() {
       let launch;
+      const runtimeConfig = config || readRuntimeConfig({ env });
       try {
         await portCheck(4510);
         await portCheck(4511);
         if (closing) throw new Error("Shared Codex startup was cancelled.");
-        launch = buildRuntimeLaunch(config || readRuntimeConfig({ env }), env, platform);
+        launch = buildRuntimeLaunch(runtimeConfig, env, platform);
       } catch (error) {
         failure = error.message;
         report("error", failure);
@@ -190,15 +205,16 @@ function createVoiceRuntime({ config, env = process.env, platform = process.plat
       try {
         const deadline = Date.now() + timeoutMs;
         while (!closing) {
-          try { await probe(CODEX_ENDPOINT, { timeoutMs: 1000 }); break; } catch {
+          try { await probe(CODEX_ENDPOINT, { timeoutMs: 1000, nativeToken: runtimeConfig.nativeToken }); break; } catch {
             if (Date.now() >= deadline) throw new Error("Shared Codex startup timed out.");
             await sleep(200);
           }
         }
         if (closing) throw new Error(failure || "Shared Codex startup was cancelled.");
-        gateway = gatewayFactory({ listenHost: "127.0.0.1", port: 4510, upstreamUrl: CODEX_ENDPOINT });
+        gateway = gatewayFactory({ listenHost: "127.0.0.1", port: 4510, upstreamUrl: CODEX_ENDPOINT,
+          gatewayToken: runtimeConfig.gatewayToken, nativeToken: runtimeConfig.nativeToken });
         await gateway.start();
-        await probe(VOICE_ENDPOINT);
+        await probe(resolveVoiceEndpoint(runtimeConfig));
         if (closing) throw new Error(failure || "Shared Codex startup was cancelled.");
         report("running");
         heartbeat = setInterval(() => report("running"), 5000);
@@ -221,5 +237,5 @@ async function runVoiceRuntime() {
   await runtime.start();
 }
 
-module.exports = { VOICE_ENDPOINT, CODEX_ENDPOINT, runtimePath, readRuntimeConfig, readRuntimeStatus, writeRuntimeJson,
+module.exports = { VOICE_ENDPOINT, CODEX_ENDPOINT, runtimePath, resolveVoiceEndpoint, readRuntimeConfig, readRuntimeStatus, writeRuntimeJson,
   assertPortAvailable, withRuntimeClient, probeRuntime, assertRuntimeIdle, buildRuntimeLaunch, createVoiceRuntime, runVoiceRuntime };

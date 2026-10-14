@@ -2,13 +2,13 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { createHash } = require("node:crypto");
+const { createHash, randomBytes } = require("node:crypto");
 const { execFileSync, spawn } = require("node:child_process");
 const state = require("./daemon-state");
 const { resolveCodexBinary } = require("./windows-service");
 const { buildLaunchAgentPlist } = require("./macos-launch-agent");
 const { readBridgeConfig } = require("./codex-desktop-refresher");
-const { VOICE_ENDPOINT, runtimePath, readRuntimeConfig, readRuntimeStatus, writeRuntimeJson,
+const { VOICE_ENDPOINT, runtimePath, resolveVoiceEndpoint, readRuntimeConfig, readRuntimeStatus, writeRuntimeJson,
   probeRuntime, assertRuntimeIdle, withRuntimeClient, runVoiceRuntime } = require("./voice-runtime");
 
 const LABEL = "com.remodex.voice-runtime";
@@ -85,25 +85,31 @@ async function setupVoice({ env = process.env, platform = process.platform, serv
   const previous = readRuntimeConfig({ env });
   const runtimeConfig = { nodePath: process.execPath, cliPath: CLI_PATH,
     codexPath: resolveBinary({ ...env, REMODEX_CODEX_BIN: env.REMODEX_CODEX_BIN || saved.codexPath || previous?.codexPath }, platform),
-    codexHome: env.CODEX_HOME || saved.codexHome || previous?.codexHome || path.join(os.homedir(), ".codex") };
+    codexHome: env.CODEX_HOME || saved.codexHome || previous?.codexHome || path.join(os.homedir(), ".codex"),
+    gatewayToken: previous?.gatewayToken || randomBytes(32).toString("hex"),
+    nativeToken: previous?.nativeToken || randomBytes(32).toString("hex") };
+  const endpoint = resolveVoiceEndpoint(runtimeConfig);
+  if (!/^[0-9a-f]{64}$/.test(runtimeConfig.nativeToken)) throw new Error("The saved native runtime credential is invalid. No runtime was started.");
   state.ensureRemodexStateDir({ env });
   state.ensureRemodexLogsDir({ env });
   const current = service("Status", { env, platform });
   if (current.running) {
     if (JSON.stringify(previous) !== JSON.stringify(runtimeConfig)) throw new Error("The running Voice runtime has different executable/configuration paths. Finish its tasks and run stop-voice-runtime before setup.");
-    await probe(VOICE_ENDPOINT);
+    await probe(endpoint);
   } else {
     const heartbeat = readRuntimeStatus({ env });
     if (heartbeat?.state === "running" && now() - Date.parse(heartbeat.updatedAt) < 20_000) {
       throw new Error("A Voice runtime is alive without its service owner. No new runtime was started; inspect voice-runtime-status before reinstalling.");
     }
+    // Windows mode bits do not restrict other users; secure the state directory before saving credentials.
+    if (platform === "win32") service("Install", { env, platform });
     writeRuntimeJson("voice-runtime-config.json", runtimeConfig, { env });
     fs.rmSync(runtimePath("voice-runtime-status.json", { env }), { force: true });
-    service("Install", { env, platform });
+    if (platform !== "win32") service("Install", { env, platform });
     service("Start", { env, platform });
     const deadline = now() + timeoutMs;
     while (true) {
-      try { await probe(VOICE_ENDPOINT); break; } catch {
+      try { await probe(endpoint); break; } catch {
         const status = readRuntimeStatus({ env });
         if (status?.state === "error") throw new Error(status.lastError || "Voice runtime startup failed.");
         if (now() >= deadline) throw new Error("Voice runtime startup timed out. Inspect voice-runtime-status; no bridge configuration was changed.");
@@ -112,11 +118,15 @@ async function setupVoice({ env = process.env, platform = process.platform, serv
     }
   }
   const currentConfig = state.readDaemonConfig({ env }) || saved;
-  // Only the endpoint is backed up: rollback must preserve later relay/pairing changes.
+  // Back up only connection fields, preserving later relay/pairing and manual connection changes.
   if (!fs.existsSync(runtimePath(BACKUP_FILE, { env }))) writeRuntimeJson(BACKUP_FILE, {
     hadCodexEndpoint: Object.hasOwn(currentConfig, "codexEndpoint"), codexEndpoint: currentConfig.codexEndpoint || "",
+    installedCodexEndpoint: endpoint,
+    changedCodexHome: currentConfig.codexHome !== runtimeConfig.codexHome,
+    hadCodexHome: Object.hasOwn(currentConfig, "codexHome"), codexHome: currentConfig.codexHome || "",
+    installedCodexHome: runtimeConfig.codexHome,
   }, { env });
-  state.writeDaemonConfig({ ...readBridgeConfig({ env }), ...currentConfig, codexEndpoint: VOICE_ENDPOINT }, { env });
+  state.writeDaemonConfig({ ...readBridgeConfig({ env }), ...currentConfig, codexEndpoint: endpoint, codexHome: runtimeConfig.codexHome }, { env });
   return { endpoint: VOICE_ENDPOINT, migrationRequired: true,
     nextStep: "Wait for all Desktop and Remodex tasks to finish, quit Desktop normally, then run remodex open-desktop <originalThreadId>. Restart only the Remodex bridge after its old tasks are idle." };
 }
@@ -125,7 +135,7 @@ async function stopVoiceRuntime({ env = process.env, platform = process.platform
   assertIdle = assertRuntimeIdle, uninstall = false, now = Date.now } = {}) {
   const heartbeat = readRuntimeStatus({ env });
   if (service("Status", { env, platform }).running
-      || (heartbeat?.state === "running" && now() - Date.parse(heartbeat.updatedAt) < 20_000)) await assertIdle();
+      || (heartbeat?.state === "running" && now() - Date.parse(heartbeat.updatedAt) < 20_000)) await assertIdle({ env });
   service(uninstall ? "Uninstall" : "Stop", { env, platform });
   return { stopped: true };
 }
@@ -137,8 +147,14 @@ async function rollbackVoice(options = {}) {
   await stopVoiceRuntime({ ...options, uninstall: true });
   const backup = JSON.parse(fs.readFileSync(backupPath, "utf8"));
   const config = state.readDaemonConfig({ env }) || {};
-  if (backup.hadCodexEndpoint) config.codexEndpoint = backup.codexEndpoint;
-  else delete config.codexEndpoint;
+  if (config.codexEndpoint === backup.installedCodexEndpoint) {
+    if (backup.hadCodexEndpoint) config.codexEndpoint = backup.codexEndpoint;
+    else delete config.codexEndpoint;
+  }
+  if (backup.changedCodexHome && config.codexHome === backup.installedCodexHome) {
+    if (backup.hadCodexHome) config.codexHome = backup.codexHome;
+    else delete config.codexHome;
+  }
   state.writeDaemonConfig(config, { env });
   fs.rmSync(backupPath);
   return { restored: true, nextStep: "Quit the shared Desktop normally, start Desktop from its usual launcher, then restart the bridge." };
@@ -192,7 +208,8 @@ async function openSharedDesktop(threadId = "", { env = process.env, platform = 
   resolveDesktop = resolveDesktopExecutable, assertStopped = assertDesktopStopped, spawnImpl = spawn,
   client = withRuntimeClient, fsImpl = fs } = {}) {
   const config = readRuntimeConfig({ env });
-  if (!config || state.readDaemonConfig({ env })?.codexEndpoint !== VOICE_ENDPOINT) throw new Error("Run remodex setup-voice first.");
+  const endpoint = resolveVoiceEndpoint(config);
+  if (!config || state.readDaemonConfig({ env })?.codexEndpoint !== endpoint) throw new Error("Run remodex setup-voice first.");
   if (threadId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(threadId)) throw new Error("Use the original Codex thread UUID.");
   const executable = resolveDesktop({ env, platform });
   if (!path.isAbsolute(executable) || !fsImpl.existsSync(executable)) throw new Error("The Codex Desktop executable was not found.");
@@ -202,13 +219,13 @@ async function openSharedDesktop(threadId = "", { env = process.env, platform = 
     throw new Error("This Desktop installation does not expose the shared local runtime setting; no application was launched.");
   }
   assertStopped(executable, { env, platform });
-  await client(VOICE_ENDPOINT, async (request) => {
+  await client(endpoint, async (request) => {
     if (threadId) {
       const result = await request("thread/resume", { threadId, excludeTurns: true });
       if (result?.thread?.id !== threadId) throw new Error("Codex did not restore the original thread; Desktop was not launched.");
     } else await request("thread/loaded/list", {});
   });
-  const launchEnv = { ...env, CODEX_HOME: config.codexHome, CODEX_APP_SERVER_WS_URL: VOICE_ENDPOINT };
+  const launchEnv = { ...env, CODEX_HOME: config.codexHome, CODEX_APP_SERVER_WS_URL: endpoint };
   delete launchEnv.CODEX_APP_SERVER_FORCE_CLI;
   const child = spawnImpl(executable, threadId ? [`codex://threads/${threadId}`] : [], {
     env: launchEnv, stdio: "ignore", detached: true, windowsHide: true,
