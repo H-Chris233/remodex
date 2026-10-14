@@ -27,9 +27,9 @@ if ($Action -eq 'Run') {
     foreach ($log in @($stdout, $stderr)) {
         if (Test-Path -LiteralPath $log) { Move-Item -LiteralPath $log -Destination "$log.previous" -Force }
     }
-    # Task Scheduler may terminate only PowerShell. Record the exact child identity
+    # Task Scheduler may terminate only the launcher. Record the exact child identity
     # so stop can also terminate its tree without ever trusting a recycled PID.
-    $child = Start-Process -FilePath $config.nodePath -WindowStyle Hidden -PassThru `
+    $child = Start-Process -FilePath $config.nodePath -NoNewWindow -PassThru `
         -ArgumentList @(('"{0}"' -f $config.cliPath), 'run-service') `
         -WorkingDirectory (Split-Path -Parent $config.cliPath) `
         -RedirectStandardOutput $stdout -RedirectStandardError $stderr
@@ -94,8 +94,15 @@ switch ($Action) {
             $acl.SetAccessRule($rule)
         }
         $directoryInfo.SetAccessControl($acl)
-        $scriptArgs = '-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}" -Action Run -StateDir "{1}" -TaskName "{2}"' -f $PSCommandPath, $StateDir, $TaskName
-        $taskAction = New-ScheduledTaskAction -Execute (Join-Path $PSHOME 'powershell.exe') -Argument $scriptArgs
+        # A GUI launcher prevents console windows before PowerShell can hide them.
+        $launcher = Join-Path $StateDir 'windows-task-launcher.exe'
+        $compiledLauncher = Join-Path $StateDir 'windows-task-launcher.new.exe'
+        if (Test-Path -LiteralPath $compiledLauncher) { Remove-Item -LiteralPath $compiledLauncher -Force }
+        Add-Type -Path (Join-Path $PSScriptRoot 'windows-task-launcher.cs') -OutputAssembly $compiledLauncher -OutputType WindowsApplication
+        Move-Item -LiteralPath $compiledLauncher -Destination $launcher -Force
+        $quotedStateDir = $StateDir + ('\' * ($StateDir.Length - $StateDir.TrimEnd('\').Length))
+        $scriptArgs = '"{0}" "{1}" "{2}"' -f $PSCommandPath, $quotedStateDir, $TaskName
+        $taskAction = New-ScheduledTaskAction -Execute $launcher -Argument $scriptArgs
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity.Name
         $principal = New-ScheduledTaskPrincipal -UserId $identity.Name -LogonType Interactive -RunLevel Limited
         $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) `

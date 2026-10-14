@@ -19,6 +19,29 @@ struct BridgeSnapshot: Codable, Equatable {
     let trustedDevice: BridgeTrustedDeviceSummary?
     let stdoutLogPath: String
     let stderrLogPath: String
+    var pendingPairingApproval: BridgePairingApproval? = nil
+}
+
+struct BridgePairingApproval: Codable, Equatable {
+    let requestId: String
+    let fingerprint: String
+    let expiresAt: Int64
+    let stage: String
+    let replacesTrustedPhone: Bool
+
+    var expiryDate: Date { Date(timeIntervalSince1970: Double(expiresAt) / 1000) }
+    var isValid: Bool {
+        requestId.range(of: "^[a-f0-9]{32}$", options: .regularExpression) != nil
+            && fingerprint.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil
+            && ["awaitingComputer", "awaitingPhone"].contains(stage)
+            && expiryDate > Date()
+    }
+    var groupedFingerprint: String {
+        let characters = Array(fingerprint.uppercased())
+        return stride(from: 0, to: characters.count, by: 8).map {
+            String(characters[$0..<min($0 + 8, characters.count)])
+        }.joined(separator: " ")
+    }
 }
 
 struct BridgeDaemonConfig: Codable, Equatable {

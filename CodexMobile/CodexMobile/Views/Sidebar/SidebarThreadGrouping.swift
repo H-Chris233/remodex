@@ -62,6 +62,7 @@ struct SidebarProjectChoice: Identifiable, Equatable {
     let iconSystemName: String
     let projectPath: String
     let sortDate: Date
+    var nativeProjectId: String? = nil
 }
 
 struct SidebarThreadGroup: Identifiable {
@@ -71,6 +72,8 @@ struct SidebarThreadGroup: Identifiable {
     let sortDate: Date
     let projectPath: String?
     let threads: [CodexThread]
+    var desktopProject: CodexDesktopProject? = nil
+    var desktopScopeKey: String? = nil
 
     var iconSystemName: String {
         switch kind {
@@ -107,12 +110,14 @@ enum SidebarThreadGrouping {
         pinnedThreadIDs: [String] = [],
         scope: SidebarThreadGroupingScope = .all,
         projectlessRootPaths: [String] = [],
+        desktopSnapshot: CodexDesktopSidebarSnapshot? = nil,
+        searchQuery: String = "",
         runBadgeStateByThreadID: [String: CodexThreadRunBadgeState] = [:],
         now _: Date = Date(),
         calendar _: Calendar = .current
     ) -> [SidebarThreadGroup] {
         var groups: [SidebarThreadGroup] = []
-        let scopedThreads = threadsForScope(scope, from: threads, projectlessRootPaths: projectlessRootPaths)
+        let scopedThreads = threadsForScope(scope, from: threads, projectlessRootPaths: projectlessRootPaths, desktopSnapshot: desktopSnapshot)
         let pinnedThreads = collectPinnedThreads(from: scopedThreads, pinnedRootThreadIDs: pinnedThreadIDs)
         let pinnedThreadIDSet = Set(pinnedThreads.map(\.id))
 
@@ -131,11 +136,12 @@ enum SidebarThreadGrouping {
 
         switch scope {
         case .all:
-            let projectThreads = threadsForScope(.projects, from: scopedThreads, projectlessRootPaths: projectlessRootPaths)
-            let chatThreads = threadsForScope(.chats, from: scopedThreads, projectlessRootPaths: projectlessRootPaths)
+            let projectThreads = threadsForScope(.projects, from: scopedThreads, projectlessRootPaths: projectlessRootPaths, desktopSnapshot: desktopSnapshot)
+            let chatThreads = threadsForScope(.chats, from: scopedThreads, projectlessRootPaths: projectlessRootPaths, desktopSnapshot: desktopSnapshot)
             groups.append(contentsOf: makeProjectGroups(
                 from: projectThreads,
                 excludingPinnedThreadIDs: pinnedThreadIDSet,
+                desktopSnapshot: desktopSnapshot,
                 runBadgeStateByThreadID: runBadgeStateByThreadID
             ))
             if let chatGroup = makeRootlessChatGroup(
@@ -149,6 +155,7 @@ enum SidebarThreadGrouping {
             groups.append(contentsOf: makeProjectGroups(
                 from: scopedThreads,
                 excludingPinnedThreadIDs: pinnedThreadIDSet,
+                desktopSnapshot: desktopSnapshot,
                 runBadgeStateByThreadID: runBadgeStateByThreadID
             ))
         case .chats:
@@ -161,22 +168,36 @@ enum SidebarThreadGrouping {
             }
         }
 
-        return groups
+        guard !searchQuery.isEmpty else { return groups }
+        return groups.filter { group in
+            !group.threads.isEmpty || group.label.localizedCaseInsensitiveContains(searchQuery)
+                || desktopSnapshot?.sections.contains(where: { section in
+                    section.name.localizedCaseInsensitiveContains(searchQuery)
+                        && section.projectIds.contains(group.desktopProject?.id ?? "")
+                }) == true
+        }
     }
 
     // Keeps the UI picker from leaking project chats into rootless Chats and vice versa.
     static func threadsForScope(
         _ scope: SidebarThreadGroupingScope,
         from threads: [CodexThread],
-        projectlessRootPaths: [String] = []
+        projectlessRootPaths: [String] = [],
+        desktopSnapshot: CodexDesktopSidebarSnapshot? = nil
     ) -> [CodexThread] {
+        let threadsByID = Dictionary(uniqueKeysWithValues: threads.map { ($0.id, $0) })
+        func isChat(_ thread: CodexThread) -> Bool {
+            if desktopSnapshot?.project(for: thread, threadsByID: threadsByID) != nil { return false }
+            if desktopSnapshot?.excludedThreadIds.contains(thread.id) == true { return true }
+            return isRootlessChatThread(thread, projectlessRootPaths: projectlessRootPaths)
+        }
         switch scope {
         case .all:
             return threads
         case .projects:
-            return threads.filter { !isRootlessChatThread($0, projectlessRootPaths: projectlessRootPaths) }
+            return threads.filter { !isChat($0) }
         case .chats:
-            return threads.filter { isRootlessChatThread($0, projectlessRootPaths: projectlessRootPaths) }
+            return threads.filter { isChat($0) }
         }
     }
 
@@ -194,13 +215,15 @@ enum SidebarThreadGrouping {
     // Reuses the sidebar project grouping rules for places like the New Chat chooser.
     static func makeProjectChoices(
         from threads: [CodexThread],
-        projectlessRootPaths: [String] = []
+        projectlessRootPaths: [String] = [],
+        desktopSnapshot: CodexDesktopSidebarSnapshot? = nil
     ) -> [SidebarProjectChoice] {
         makeProjectGroups(from: threadsForScope(
             .projects,
             from: threads,
-            projectlessRootPaths: projectlessRootPaths
-        )).compactMap { group in
+            projectlessRootPaths: projectlessRootPaths,
+            desktopSnapshot: desktopSnapshot
+        ), desktopSnapshot: desktopSnapshot).compactMap { group in
             guard let projectPath = group.projectPath else {
                 return nil
             }
@@ -210,35 +233,43 @@ enum SidebarThreadGrouping {
                 label: group.label,
                 iconSystemName: group.iconSystemName,
                 projectPath: projectPath,
-                sortDate: group.sortDate
+                sortDate: group.sortDate,
+                nativeProjectId: group.desktopProject?.projectId
             )
         }
     }
 
     // Resolves all live thread ids that belong to the tapped project, even if the visible group is filtered.
-    static func liveThreadIDsForProjectGroup(_ group: SidebarThreadGroup, in threads: [CodexThread]) -> [String] {
+    static func liveThreadIDsForProjectGroup(_ group: SidebarThreadGroup, in threads: [CodexThread], desktopSnapshot: CodexDesktopSidebarSnapshot? = nil) -> [String] {
         guard group.kind == .project else {
             return []
         }
 
+        let threadsByID = Dictionary(uniqueKeysWithValues: threads.map { ($0.id, $0) })
         return sortThreadsByRecentActivity(
             threads.filter { thread in
-                thread.syncState != .archivedLocal && projectGroupID(for: thread) == group.id
+                thread.syncState != .archivedLocal && belongsToProjectGroup(thread, group: group, snapshot: desktopSnapshot, threadsByID: threadsByID)
             }
         ).map(\.id)
     }
 
     // Includes archived and pinned chats so local project removal fully hides the project on this device.
-    static func allThreadIDsForProjectGroup(_ group: SidebarThreadGroup, in threads: [CodexThread]) -> [String] {
+    static func allThreadIDsForProjectGroup(_ group: SidebarThreadGroup, in threads: [CodexThread], desktopSnapshot: CodexDesktopSidebarSnapshot? = nil) -> [String] {
         guard group.kind == .project else {
             return []
         }
 
+        let threadsByID = Dictionary(uniqueKeysWithValues: threads.map { ($0.id, $0) })
         return sortThreadsByRecentActivity(
             threads.filter { thread in
-                projectGroupID(for: thread) == group.id
+                belongsToProjectGroup(thread, group: group, snapshot: desktopSnapshot, threadsByID: threadsByID)
             }
         ).map(\.id)
+    }
+
+    private static func belongsToProjectGroup(_ thread: CodexThread, group: SidebarThreadGroup, snapshot: CodexDesktopSidebarSnapshot?, threadsByID: [String: CodexThread]) -> Bool {
+        if let project = group.desktopProject { return snapshot?.project(for: thread, threadsByID: threadsByID)?.id == project.id }
+        return snapshot?.project(for: thread, threadsByID: threadsByID) == nil && projectGroupID(for: thread) == group.id
     }
 
     // The group speaks for the project, not for whichever chat happens to sort first: a worktree
@@ -390,13 +421,21 @@ enum SidebarThreadGrouping {
     private static func makeProjectGroups(
         from threads: [CodexThread],
         excludingPinnedThreadIDs pinnedThreadIDs: Set<String> = [],
+        desktopSnapshot: CodexDesktopSidebarSnapshot? = nil,
         runBadgeStateByThreadID: [String: CodexThreadRunBadgeState] = [:]
     ) -> [SidebarThreadGroup] {
         var liveThreadsByProject: [String: [CodexThread]] = [:]
         var projectPathByGroupKey: [String: String] = [:]
+        let desktopProjectsByKey = Dictionary(uniqueKeysWithValues: (desktopSnapshot?.projects ?? []).map { ("desktop:" + $0.id, $0) })
+        let threadsByID = Dictionary(uniqueKeysWithValues: threads.map { ($0.id, $0) })
+        for key in desktopProjectsByKey.keys { liveThreadsByProject[key] = [] }
 
         for thread in threads where thread.syncState != .archivedLocal {
             guard !pinnedThreadIDs.contains(thread.id) else {
+                continue
+            }
+            if let project = desktopSnapshot?.project(for: thread, threadsByID: threadsByID) {
+                liveThreadsByProject["desktop:" + project.id, default: []].append(thread)
                 continue
             }
             liveThreadsByProject[thread.projectGroupKey, default: []].append(thread)
@@ -406,7 +445,17 @@ enum SidebarThreadGrouping {
         }
 
         return liveThreadsByProject.map { projectKey, projectThreads in
-            makeProjectGroup(
+            if let project = desktopProjectsByKey[projectKey] {
+                return SidebarThreadGroup(
+                    id: projectKey, label: project.name, kind: .project,
+                    sortDate: projectThreads.compactMap { $0.updatedAt ?? $0.createdAt }.max() ?? .distantPast,
+                    projectPath: project.rootPaths.first,
+                    threads: sortThreadsByRecentActivity(projectThreads, runBadgeStateByThreadID: runBadgeStateByThreadID),
+                    desktopProject: project,
+                    desktopScopeKey: desktopSnapshot?.scopeKey
+                )
+            }
+            return makeProjectGroup(
                 projectKey: projectKey,
                 projectPath: projectPathByGroupKey[projectKey],
                 threads: projectThreads,

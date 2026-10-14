@@ -39,7 +39,7 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
     let onOpenSettings: () -> Void
     let onOpenDevicesSettings: () -> Void
     let onOpenTerminal: () -> Void
-    let onOpenNewChatDraft: (NewChatDraftSource, String?, CodexRuntimeProvider?) -> Void
+    let onOpenNewChatDraft: (NewChatDraftSource, String?, CodexRuntimeProvider?, String?) -> Void
     let onNewChatCreationStateChange: (Bool) -> Void
     let onOpenThread: (CodexThread) -> Void
     // Centered connect/reconnect card shown when the relay is offline and the
@@ -67,8 +67,10 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
     @State private var lastGroupedThreadsFingerprint: Int = 0
     @State private var lastBadgeFingerprint: Int = 0
     @State private var projectlessChatRootPaths: [String] = []
-    @AppStorage(SidebarProjectExpansionState.collapsedProjectGroupIDsStorageKey)
-    private var collapsedProjectGroupIDsStorage = ""
+    private var collapsedProjectGroupIDsStorage: String {
+        get { codex.sidebarCollapsedProjectIDsStorage }
+        nonmutating set { codex.sidebarCollapsedProjectIDsStorage = newValue }
+    }
 
     var body: some View {
         // The header is hosted via `adaptiveTopBar` — `safeAreaBar(edge:.top)`
@@ -97,6 +99,7 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
                 rebuildGroupedThreads()
                 rebuildCachedSidebarState()
                 await refreshProjectlessChatRoots()
+                await codex.refreshDesktopSidebar()
                 if codex.isConnected, codex.threads.isEmpty {
                     await refreshThreads()
                 }
@@ -121,6 +124,9 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
                 debugSidebarLog("pinned threads changed count=\(codex.pinnedThreadIDs.count)")
                 rebuildGroupedThreads()
             }
+            .onChange(of: codex.desktopSidebarSnapshot?.revision) { _, _ in
+                rebuildGroupedThreads()
+            }
             .onChange(of: codex.isConnected) { _, isConnected in
                 guard isConnected else { return }
                 Task { @MainActor in await refreshProjectlessChatRoots() }
@@ -140,11 +146,12 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
             }
             .onChange(of: isVisible) { _, visible in
                 debugSidebarLog("visibility changed visible=\(visible)")
+                if visible { Task { @MainActor in await codex.refreshDesktopSidebar() } }
             }
             .overlay {
                 if SidebarThreadsLoadingPresentation.shouldShowOverlay(
                     isLoadingThreads: codex.isLoadingThreads,
-                    threadCount: codex.threads.count
+                    threadCount: codex.threads.count + (codex.desktopSidebarSnapshot?.projects.count ?? 0)
                 ) {
                     ProgressView()
                         .padding()
@@ -229,6 +236,8 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
             activityRefreshGeneration += 1
         }
         let startedAt = Date()
+        codex.resetDesktopSidebarRequests()
+        await codex.refreshDesktopSidebar(force: true)
         debugSidebarLog("refreshThreads start threadCount=\(codex.threads.count)")
         do {
             try await codex.listThreads()
@@ -266,14 +275,14 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
     // this path to preserve "What should we work on?" + folder picker.
     private func handleNewChatButtonTap() {
         prepareSidebarForChatNavigation()
-        onOpenNewChatDraft(.generalChat, defaultNewChatProjectPath, nil)
+        onOpenNewChatDraft(.generalChat, defaultNewChatProjectPath, nil, newChatProjectChoices.first?.nativeProjectId)
     }
 
     // Opens the global Chats scope as a plain rootless draft: no folder picker,
     // no preselected project, just the prompt and composer.
     private func handleRootlessChatDraftTap() {
         prepareSidebarForChatNavigation()
-        onOpenNewChatDraft(.generalChat, nil, nil)
+        onOpenNewChatDraft(.generalChat, nil, nil, nil)
     }
 
     // Routes the shared bottom Chat button by the active sidebar scope without
@@ -332,7 +341,7 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
         }
     }
 
-    private func handleNewWorktreeChatTap(preferredProjectPath: String) {
+    private func handleNewWorktreeChatTap(preferredProjectPath: String, preferredProjectId: String? = nil) {
         createThreadErrorMessage = nil
         isCreatingThread = true
         prepareSidebarForChatNavigation()
@@ -347,6 +356,7 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
             do {
                 let thread = try await WorktreeFlowCoordinator.startNewWorktreeChat(
                     preferredProjectPath: preferredProjectPath,
+                    preferredProjectId: preferredProjectId,
                     codex: codex
                 )
                 onOpenThread(thread)
@@ -387,20 +397,27 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
     private func archivePendingProjectGroup() {
         guard let group = projectGroupPendingArchive else { return }
 
-        let threadIDs = SidebarThreadGrouping.liveThreadIDsForProjectGroup(group, in: codex.threads)
-        let selectedThreadWasArchived = selectedThread.map { selected in
-            threadIDs.contains(selected.id)
-        } ?? false
-
-        _ = codex.archiveThreadGroup(threadIDs: threadIDs)
-
-        if selectedThreadWasArchived {
-            selectedThread = codex.threads.first(where: { thread in
-                thread.syncState == .live && !threadIDs.contains(thread.id)
-            })
-        }
-
         projectGroupPendingArchive = nil
+        let deviceId = codex.currentMacScopedPersistenceDeviceId
+        Task { @MainActor in
+            do {
+                guard codex.currentMacScopedPersistenceDeviceId == deviceId,
+                      group.desktopProject == nil || group.desktopScopeKey == codex.desktopSidebarSnapshot?.scopeKey else {
+                    throw CodexServiceError.invalidInput("The connected project changed. Select it again before archiving.")
+                }
+                let threadIDs: [String]
+                if let project = group.desktopProject {
+                    threadIDs = try await codex.allDesktopProjectThreadIDs(project.id)
+                } else {
+                    threadIDs = SidebarThreadGrouping.liveThreadIDsForProjectGroup(group, in: codex.threads, desktopSnapshot: codex.desktopSidebarSnapshot)
+                }
+                let selectedWasArchived = selectedThread.map { threadIDs.contains($0.id) } ?? false
+                _ = codex.archiveThreadGroup(threadIDs: threadIDs)
+                if selectedWasArchived {
+                    selectedThread = codex.threads.first { $0.syncState == .live && !threadIDs.contains($0.id) }
+                }
+            } catch { createThreadErrorMessage = error.localizedDescription }
+        }
     }
 
     // Removes every local chat for the selected project while leaving the desktop runtime untouched.
@@ -429,12 +446,21 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
         if query.isEmpty {
             return liveThreads
         } else {
+            let threadsByID = Dictionary(uniqueKeysWithValues: liveThreads.map { ($0.id, $0) })
             return liveThreads.filter {
                 $0.displayTitle.localizedCaseInsensitiveContains(query)
                 || ($0.preview?.localizedCaseInsensitiveContains(query) ?? false)
                 || $0.projectDisplayName.localizedCaseInsensitiveContains(query)
                 || ($0.normalizedProjectPath?.localizedCaseInsensitiveContains(query) ?? false)
+                || matchesDesktopProjectSearch($0, query: query, threadsByID: threadsByID)
             }
+        }
+    }
+
+    private func matchesDesktopProjectSearch(_ thread: CodexThread, query: String, threadsByID: [String: CodexThread]) -> Bool {
+        guard let snapshot = codex.desktopSidebarSnapshot, let project = snapshot.project(for: thread, threadsByID: threadsByID) else { return false }
+        return project.name.localizedCaseInsensitiveContains(query) || snapshot.sections.contains {
+            $0.projectIds.contains(project.id) && $0.name.localizedCaseInsensitiveContains(query)
         }
     }
 
@@ -459,6 +485,8 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
             pinnedThreadIDs: codex.pinnedThreadIDs,
             scope: sidebarGroupingScope,
             projectlessRootPaths: projectlessChatRootPaths,
+            desktopSnapshot: codex.desktopSidebarSnapshot,
+            searchQuery: query,
             runBadgeStateByThreadID: runBadges
         )
         debugSidebarLog(
@@ -477,6 +505,7 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
         hasher.combine(query)
         hasher.combine(selectedContentScope)
         hasher.combine(projectlessChatRootPaths)
+        hasher.combine(codex.desktopSidebarSnapshot?.revision)
         hasher.combine(codex.pinnedThreadIDs)
         for thread in source {
             hasher.combine(thread)
@@ -534,7 +563,8 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
     private var newChatProjectChoices: [SidebarProjectChoice] {
         SidebarThreadGrouping.makeProjectChoices(
             from: codex.threads,
-            projectlessRootPaths: projectlessChatRootPaths
+            projectlessRootPaths: projectlessChatRootPaths,
+            desktopSnapshot: codex.desktopSidebarSnapshot
         )
     }
 
@@ -575,7 +605,8 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
         return SidebarThreadGrouping.threadsForScope(
             sidebarGroupingScope,
             from: codex.threads,
-            projectlessRootPaths: projectlessChatRootPaths
+            projectlessRootPaths: projectlessChatRootPaths,
+            desktopSnapshot: codex.desktopSidebarSnapshot
         )
     }
 
@@ -670,6 +701,7 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
     private var shouldShowConnectionEmptyState: Bool {
         guard !codex.isConnected else { return false }
         guard codex.threads.isEmpty else { return false }
+        guard codex.desktopSidebarSnapshot?.projects.isEmpty != false else { return false }
         guard !isSearchActive else { return false }
         let trimmedQuery = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmedQuery.isEmpty
@@ -702,7 +734,7 @@ struct SidebarView<ConnectionEmptyStatePanel: View, ConnectionEmptyStateFooter: 
                             < (rhs.updatedAt ?? rhs.createdAt ?? .distantPast)
                     })?.runtimeProvider
                     : nil
-                onOpenNewChatDraft(source, group.projectPath, preferredProvider)
+                onOpenNewChatDraft(source, group.projectPath, preferredProvider, group.desktopProject?.projectId)
             },
             onArchiveProjectGroup: { group in
                 projectGroupPendingArchive = group
@@ -837,13 +869,14 @@ private extension SidebarView {
             SidebarNewChatProjectPickerSheet(
                 choices: newChatProjectChoices,
                 showsWithoutProjectOption: false,
-                onSelectProject: { projectPath in
+                onSelectProject: { choice in
                     activeSidebarSheet = nil
-                    handleNewChatTap(preferredProjectPath: projectPath)
+                    prepareSidebarForChatNavigation()
+                    onOpenNewChatDraft(.folderChat, choice.projectPath, nil, choice.nativeProjectId)
                 },
-                onSelectWorktreeProject: { projectPath in
+                onSelectWorktreeProject: { choice in
                     activeSidebarSheet = nil
-                    handleNewWorktreeChatTap(preferredProjectPath: projectPath)
+                    handleNewWorktreeChatTap(preferredProjectPath: choice.projectPath, preferredProjectId: choice.nativeProjectId)
                 },
                 onSelectWithoutProject: {
                     activeSidebarSheet = nil

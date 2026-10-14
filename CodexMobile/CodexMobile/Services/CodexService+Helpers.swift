@@ -111,6 +111,7 @@ extension CodexService {
         if merged.createdAt == nil { merged.createdAt = existing.createdAt }
         if merged.updatedAt == nil { merged.updatedAt = existing.updatedAt }
         if merged.cwd == nil { merged.cwd = existing.normalizedProjectPath }
+        if !treatAsServerState, merged.projectId == nil { merged.projectId = existing.projectId }
         merged.metadata = mergedThreadMetadata(
             serverMetadata: merged.metadata,
             localMetadata: existing.metadata

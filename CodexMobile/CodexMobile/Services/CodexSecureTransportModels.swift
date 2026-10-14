@@ -7,8 +7,8 @@
 import CryptoKit
 import Foundation
 
-let codexSecureProtocolVersion = 2
-let codexPairingQRVersion = 2
+let codexSecureProtocolVersion = 3
+let codexPairingQRVersion = 3
 let codexSecureHandshakeTag = "remodex-e2ee-v1"
 let codexSecureHandshakeLabel = "client-auth"
 let codexSecureClockSkewToleranceSeconds: TimeInterval = 60
@@ -25,6 +25,8 @@ enum CodexSecureConnectionState: Equatable, Sendable {
     case trustedMac
     case liveSessionUnresolved
     case handshaking
+    case awaitingComputerApproval
+    case awaitingPhoneConfirmation
     case encrypted
     case reconnecting
     case rePairRequired
@@ -110,6 +112,7 @@ struct SecureServerHello: Codable, Sendable {
     let macSignature: String
     let clientNonce: String?
     var displayName: String? = nil
+    var pairingRequestId: String? = nil
 }
 
 struct SecureClientAuth: Codable, Sendable {
@@ -136,9 +139,62 @@ struct SecureClientAuth: Codable, Sendable {
 
 struct SecureReadyMessage: Codable, Sendable {
     let kind: String
+    let protocolVersion: Int
     let sessionId: String
     let keyEpoch: Int
     let macDeviceId: String
+    let requestId: String
+    let macSignature: String
+
+    func isValid(for hello: SecureServerHello, transcriptBytes: Data, approvalNonce: String) -> Bool {
+        guard kind == "secureReady", protocolVersion == codexSecureProtocolVersion,
+              sessionId == hello.sessionId, keyEpoch == hello.keyEpoch,
+              macDeviceId == hello.macDeviceId, requestId == (hello.pairingRequestId ?? ""),
+              let signature = Data(base64Encoded: macSignature),
+              let key = try? Curve25519.Signing.PublicKey(rawRepresentation: Data(base64EncodedOrEmpty: hello.macIdentityPublicKey)) else { return false }
+        return key.isValidSignature(signature, for: codexPairingControlTranscript(transcriptBytes, label: "secure-ready", approvalNonce: approvalNonce))
+    }
+}
+
+struct SecurePairingApproved: Codable, Sendable {
+    let kind: String
+    let protocolVersion: Int
+    let sessionId: String
+    let keyEpoch: Int
+    let requestId: String
+    let expiresAt: Int64
+    let approvalNonce: String
+    let macSignature: String
+
+    func isValid(for hello: SecureServerHello, transcriptBytes: Data) -> Bool {
+        guard kind == "pairingApproved", protocolVersion == codexSecureProtocolVersion,
+              hello.handshakeMode == .qrBootstrap, sessionId == hello.sessionId,
+              keyEpoch == hello.keyEpoch, requestId == hello.pairingRequestId,
+              expiresAt == hello.expiresAtForTranscript,
+              let nonce = Data(base64Encoded: approvalNonce), nonce.count == 32,
+              nonce.base64EncodedString() == approvalNonce,
+              let signature = Data(base64Encoded: macSignature),
+              let key = try? Curve25519.Signing.PublicKey(rawRepresentation: Data(base64EncodedOrEmpty: hello.macIdentityPublicKey)) else { return false }
+        return key.isValidSignature(signature, for: codexPairingControlTranscript(transcriptBytes, label: "pairing-approved", approvalNonce: approvalNonce))
+    }
+}
+
+struct SecureClientPairingDecision: Codable, Sendable {
+    let kind: String
+    let sessionId: String
+    let phoneDeviceId: String
+    let keyEpoch: Int
+    let requestId: String
+    let approvalNonce: String
+    let phoneSignature: String
+}
+
+struct CodexPairingApprovalPresentation: Equatable {
+    let requestId: String
+    let fingerprint: String
+    let expiresAt: Date
+    var computerApproved = false
+    var phoneConfirmed = false
 }
 
 struct SecureResumeState: Codable, Sendable {
@@ -293,6 +349,10 @@ extension CodexSecureConnectionState {
             return "Trusted Device ready"
         case .handshaking:
             return "Secure handshake in progress"
+        case .awaitingComputerApproval:
+            return "Waiting for computer approval"
+        case .awaitingPhoneConfirmation:
+            return "Compare pairing fingerprints"
         case .encrypted:
             return "End-to-end encrypted"
         case .reconnecting:
@@ -336,7 +396,8 @@ func codexSecureTranscriptBytes(
     phoneEphemeralPublicKey: String,
     clientNonce: Data,
     serverNonce: Data,
-    expiresAtForTranscript: Int64
+    expiresAtForTranscript: Int64,
+    pairingRequestId: String = ""
 ) -> Data {
     var data = Data()
     data.appendLengthPrefixedUTF8(codexSecureHandshakeTag)
@@ -353,6 +414,7 @@ func codexSecureTranscriptBytes(
     data.appendLengthPrefixedData(clientNonce)
     data.appendLengthPrefixedData(serverNonce)
     data.appendLengthPrefixedUTF8(String(expiresAtForTranscript))
+    data.appendLengthPrefixedUTF8(pairingRequestId)
     return data
 }
 
@@ -361,6 +423,17 @@ func codexClientAuthTranscript(from transcriptBytes: Data) -> Data {
     var data = transcriptBytes
     data.appendLengthPrefixedUTF8(codexSecureHandshakeLabel)
     return data
+}
+
+func codexPairingControlTranscript(_ transcriptBytes: Data, label: String, approvalNonce: String = "") -> Data {
+    var data = transcriptBytes
+    data.appendLengthPrefixedUTF8(label)
+    data.appendLengthPrefixedData(Data(base64EncodedOrEmpty: approvalNonce))
+    return data
+}
+
+func codexPairingFingerprint(_ transcriptBytes: Data) -> String {
+    SHA256.hash(data: transcriptBytes).map { String(format: "%02x", $0) }.joined()
 }
 
 // Derives the deterministic AES-GCM nonce from direction + counter.

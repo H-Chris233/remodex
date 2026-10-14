@@ -18,6 +18,7 @@ struct BridgeMenuBarContentView: View {
             VStack(alignment: .leading, spacing: 10) {
                 headerSection
                 if store.isCLIAvailable {
+                    pairingApprovalSection
                     statusSection
                     relaySection
                     commandSection
@@ -41,6 +42,36 @@ struct BridgeMenuBarContentView: View {
     }
 
     // MARK: - Header
+
+    @ViewBuilder
+    private var pairingApprovalSection: some View {
+        if let request = store.pendingPairingApproval {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(request.stage == "awaitingPhone" ? "Confirm on the iPhone" : "Verify a new pairing")
+                    .font(.headline)
+                Text("Compare every group with your iPhone. Approve only if the entire fingerprint matches.")
+                    .font(.callout)
+                Text(request.groupedFingerprint)
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+                    .accessibilityLabel("Pairing fingerprint: \(request.groupedFingerprint)")
+                if request.replacesTrustedPhone {
+                    Text("Completing this pairing replaces the currently trusted phone.")
+                        .font(.caption)
+                }
+                Text(request.expiryDate, style: .timer).monospacedDigit()
+                HStack {
+                    Button("Fingerprints match — approve") { store.decidePairing(request, approve: true) }
+                        .disabled(store.isPerformingAction || request.stage != "awaitingComputer")
+                    Button("Reject", role: .destructive) { store.decidePairing(request, approve: false) }
+                        .disabled(store.isPerformingAction)
+                }
+            }
+            .padding(12)
+            .background(cardFill, in: cardShape)
+            .overlay(cardBorder)
+        }
+    }
 
     private var headerSection: some View {
         VStack(alignment: .leading, spacing: 12) {

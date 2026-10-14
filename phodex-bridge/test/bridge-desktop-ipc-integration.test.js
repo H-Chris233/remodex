@@ -1729,6 +1729,7 @@ function createPlaintextSecureTransport() {
       return { v: 1, expiresAt: Date.now() + 60_000 };
     },
     bindLiveSendWireMessage() {},
+    cancelPendingHandshake() {},
     handleIncomingWireMessage(message, { onApplicationMessage }) {
       onApplicationMessage(message);
       return true;

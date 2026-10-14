@@ -14,17 +14,20 @@ struct NewChatDraftRoute: Hashable {
     let id: String
     let preferredProjectPath: String?
     let source: NewChatDraftSource
+    let preferredProjectId: String?
     let preferredRuntimeProvider: CodexRuntimeProvider?
 
     init(
         id: String,
         preferredProjectPath: String?,
         source: NewChatDraftSource,
+        preferredProjectId: String? = nil,
         preferredRuntimeProvider: CodexRuntimeProvider? = nil
     ) {
         self.id = id
         self.preferredProjectPath = preferredProjectPath
         self.source = source
+        self.preferredProjectId = preferredProjectId
         self.preferredRuntimeProvider = preferredRuntimeProvider
     }
 
@@ -72,6 +75,7 @@ struct NewChatDraftView: View {
     @State private var isInputFocused = false
     @State private var hasAutoFocusedComposer = false
     @State private var selectedProjectPath: String?
+    @State private var selectedProjectId: String?
     @State private var projectlessChatRootPaths: [String] = []
     @State private var activeSheet: NewChatDraftSheet?
     @State private var hasInitializedProjectSelection = false
@@ -748,10 +752,11 @@ struct NewChatDraftView: View {
             UIAction(
                 title: choice.label,
                 image: RemodexIcon.menuUIImage(systemName: choice.iconSystemName),
-                state: selectedProjectPath == choice.projectPath ? .on : .off
+                state: selectedProjectPath == choice.projectPath && selectedProjectId == choice.nativeProjectId ? .on : .off
             ) { _ in
                 HapticFeedback.shared.triggerImpactFeedback(style: .light)
                 selectedProjectPath = choice.projectPath
+                selectedProjectId = choice.nativeProjectId
             }
         }
 
@@ -1044,7 +1049,8 @@ struct NewChatDraftView: View {
     private var projectChoices: [SidebarProjectChoice] {
         SidebarThreadGrouping.makeProjectChoices(
             from: codex.threads,
-            projectlessRootPaths: projectlessChatRootPaths
+            projectlessRootPaths: projectlessChatRootPaths,
+            desktopSnapshot: codex.desktopSidebarSnapshot
         )
     }
 
@@ -1115,12 +1121,15 @@ struct NewChatDraftView: View {
         // Keep it unbound instead of falling back to the first recent project.
         guard !(isFromGeneralChat && route.preferredProjectPath == nil) else {
             selectedProjectPath = nil
+            selectedProjectId = nil
             hasInitializedProjectSelection = true
             return
         }
 
         selectedProjectPath = CodexThreadStartProjectBinding.normalizedProjectPath(route.preferredProjectPath)
             ?? projectChoices.first?.projectPath
+        selectedProjectId = route.preferredProjectId
+            ?? (route.preferredProjectPath == nil ? projectChoices.first?.nativeProjectId : nil)
         hasInitializedProjectSelection = selectedProjectPath != nil || !projectChoices.isEmpty
     }
 
@@ -1162,9 +1171,11 @@ struct NewChatDraftView: View {
         // Worktree mode defers everything to first send: the managed worktree
         // is cut from the chosen base branch only when a message actually goes out.
         var makeWorktreeThread: (@MainActor @Sendable () async throws -> CodexThread)?
+        let frozenProjectId = selectedProjectId
+        let frozenProjectPath = selectedProjectPath
         if draftRuntimeMode == .newWorktree,
            showsGitContextRows,
-           let projectPath = selectedProjectPath {
+           let projectPath = frozenProjectPath {
             // Match what the branch row shows: explicit pick, else the current
             // checkout branch; only with neither does the repo default apply.
             let currentBranch = viewModel.currentGitBranch.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1173,6 +1184,7 @@ struct NewChatDraftView: View {
             makeWorktreeThread = {
                 try await WorktreeFlowCoordinator.startNewWorktreeChat(
                     preferredProjectPath: projectPath,
+                    preferredProjectId: frozenProjectId,
                     baseBranch: baseBranch,
                     codex: codex,
                     runtimeProvider: frozenProvider,
@@ -1187,7 +1199,8 @@ struct NewChatDraftView: View {
             viewModel.sendNewThread(
                 codex: codex,
                 draftThreadID: route.id,
-                preferredProjectPath: selectedProjectPath,
+                preferredProjectPath: frozenProjectPath,
+                preferredProjectId: frozenProjectId,
                 runtimeProvider: frozenProvider,
                 openCodeModelID: frozenOpenCodeModelID,
                 openCodeVariantID: frozenOpenCodeVariantID,
@@ -1282,16 +1295,19 @@ struct NewChatDraftView: View {
                 // Fallback sheet path stays folder-only; Quick Chat is not part of the folder picker.
                 showsWithoutProjectOption: false,
                 showsWorktreeOptions: false,
-                onSelectProject: { projectPath in
-                    selectedProjectPath = projectPath
+                onSelectProject: { choice in
+                    selectedProjectPath = choice.projectPath
+                    selectedProjectId = choice.nativeProjectId
                     activeSheet = nil
                 },
-                onSelectWorktreeProject: { projectPath in
-                    selectedProjectPath = projectPath
+                onSelectWorktreeProject: { choice in
+                    selectedProjectPath = choice.projectPath
+                    selectedProjectId = choice.nativeProjectId
                     activeSheet = nil
                 },
                 onSelectWithoutProject: {
                     selectedProjectPath = nil
+                    selectedProjectId = nil
                     activeSheet = nil
                 },
                 onBrowseLocalFolder: {
@@ -1301,6 +1317,7 @@ struct NewChatDraftView: View {
         case .localFolderBrowser:
             SidebarLocalFolderBrowserSheet { projectPath in
                 selectedProjectPath = projectPath
+                selectedProjectId = nil
                 activeSheet = nil
             }
         }

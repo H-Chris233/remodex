@@ -124,6 +124,14 @@ async function handleDesktopMethod(method, params, options = {}) {
       });
     case "desktop/preferences/read":
       return readBridgePreferences(options);
+    case "desktop/sidebar/read":
+    case "desktop/sidebar/projectThreads/list":
+      if (!options.desktopSidebar) {
+        throw desktopError("sidebar_unsupported", "Desktop sidebar is unavailable on this bridge.");
+      }
+      return method === "desktop/sidebar/read"
+        ? options.desktopSidebar.read()
+        : options.desktopSidebar.listProjectThreads(params);
     case "desktop/preferences/update":
       return updateBridgePreferences(params, options);
     case "desktop/bridge/updateAndRestart":

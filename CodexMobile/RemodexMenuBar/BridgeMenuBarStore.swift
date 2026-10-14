@@ -35,15 +35,23 @@ final class BridgeMenuBarStore: ObservableObject {
     @Published var isPerformingAction = false
     @Published var transientMessage = ""
     @Published var errorMessage = ""
+    @Published var pendingPairingApproval: BridgePairingApproval?
 
     private static let relayOverrideKey = "remodex.menuBar.relayOverride"
     private let service: BridgeControlService
     private var refreshLoopTask: Task<Void, Never>?
+    private var pairingRefreshTask: Task<Void, Never>?
 
     init(service: BridgeControlService? = nil) {
         self.service = service ?? BridgeControlService()
         self.relayOverride = UserDefaults.standard.string(forKey: Self.relayOverrideKey) ?? ""
         startRefreshLoop()
+        pairingRefreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                self?.refreshPairingApproval()
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+            }
+        }
 
         Task {
             await self.bootstrap()
@@ -52,6 +60,7 @@ final class BridgeMenuBarStore: ObservableObject {
 
     deinit {
         refreshLoopTask?.cancel()
+        pairingRefreshTask?.cancel()
     }
 
     // Refreshes the bridge snapshot plus npm update metadata so the menu bar is the new control surface.
@@ -114,6 +123,18 @@ final class BridgeMenuBarStore: ObservableObject {
             try await self.service.refreshPairing(relayOverride: self.effectiveRelayOverride)
             try await self.waitForFreshPairing(after: previousPairingDate)
         }
+    }
+
+    func decidePairing(_ request: BridgePairingApproval, approve: Bool) {
+        guard pendingPairingApproval?.requestId == request.requestId else { return }
+        runAction(successMessage: approve ? "Computer approved. Compare and confirm on the iPhone." : "Pairing rejected.") {
+            try await self.service.decidePairing(request, approve: approve, relayOverride: self.effectiveRelayOverride)
+            self.refreshPairingApproval()
+        }
+    }
+
+    private func refreshPairingApproval() {
+        pendingPairingApproval = service.loadPairingApproval(stateDirectoryPath: snapshot?.stateDirectoryPath)
     }
 
     func resumeLastThread() {

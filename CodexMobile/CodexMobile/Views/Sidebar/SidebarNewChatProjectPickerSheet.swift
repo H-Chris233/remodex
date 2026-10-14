@@ -11,8 +11,8 @@ struct SidebarNewChatProjectPickerSheet: View {
     let choices: [SidebarProjectChoice]
     var showsWithoutProjectOption = true
     var showsWorktreeOptions = true
-    let onSelectProject: (String) -> Void
-    let onSelectWorktreeProject: (String) -> Void
+    let onSelectProject: (SidebarProjectChoice) -> Void
+    let onSelectWorktreeProject: (SidebarProjectChoice) -> Void
     let onSelectWithoutProject: () -> Void
     let onBrowseLocalFolder: () -> Void
 
@@ -26,7 +26,7 @@ struct SidebarNewChatProjectPickerSheet: View {
                         ForEach(choices) { choice in
                             Button {
                                 dismiss()
-                                onSelectProject(choice.projectPath)
+                                onSelectProject(choice)
                             } label: {
                                 projectRow(
                                     icon: AnyView(
@@ -53,7 +53,7 @@ struct SidebarNewChatProjectPickerSheet: View {
                             ForEach(choices) { choice in
                                 Button {
                                     dismiss()
-                                    onSelectWorktreeProject(choice.projectPath)
+                                    onSelectWorktreeProject(choice)
                                 } label: {
                                     projectRow(
                                         icon: AnyView(

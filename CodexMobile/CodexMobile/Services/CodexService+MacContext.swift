@@ -122,6 +122,7 @@ extension CodexService {
     }
 
     func loadMacScopedDefaultsState(for macDeviceId: String?) {
+        loadDesktopSidebarCache(for: macDeviceId)
         withApplyingMacScopedState {
             if let savedThreadRuntimeOverrides = defaults.data(forKey: macScopedDefaultsKey(Self.threadRuntimeOverridesDefaultsKey, macDeviceId: macDeviceId)),
                let decodedThreadRuntimeOverrides = try? decoder.decode(
@@ -310,6 +311,7 @@ extension CodexService {
             forkedFromThreadIDByThreadID.removeAll()
             renamedThreadNameByThreadID.removeAll()
             pinnedThreadIDs.removeAll()
+            resetDesktopSidebarRequests(clearSnapshot: true)
             pinnedThreadSnapshotsByRootID.removeAll()
             snapshotOnlyPinnedThreadIDs.removeAll()
             associatedManagedWorktreePathByThreadID.removeAll()

@@ -31,7 +31,7 @@ nonisolated enum WireMessagePreDecoder {
     }
 
     private static let secureKindValues = [
-        "\"serverHello\"", "\"secureReady\"", "\"secureError\"", "\"encryptedEnvelope\""
+        "\"serverHello\"", "\"pairingApproved\"", "\"secureReady\"", "\"secureError\"", "\"encryptedEnvelope\""
     ]
 
     static func decodeRPCMessage(from text: String) -> Result {
@@ -380,6 +380,9 @@ extension CodexService {
             handleThreadGoalCleared(paramsObject)
 
         case "account/updated":
+            resetDesktopSidebarRequests(clearSnapshot: true)
+            defaults.removeObject(forKey: macScopedDefaultsKey("codex.desktopSidebar") + ".scope")
+            Task { @MainActor [weak self] in await self?.refreshDesktopSidebar(force: true) }
             handleGPTAccountUpdated(paramsObject)
 
         case "account/login/completed":

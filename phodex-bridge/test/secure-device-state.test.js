@@ -280,6 +280,25 @@ test("resetBridgeTrustState reports missing state without creating a new identit
   });
 });
 
+test("failed atomic trust replacement preserves the canonical state and Keychain mirror", () => {
+  withTempDeviceStateEnv(({ canonicalStateFile, keychainMirrorFile }) => {
+    const state = makeDeviceState({ trustedPhones: { "original-phone": "original-key" } });
+    writeStateToDisk(state);
+    const before = fs.readFileSync(canonicalStateFile, "utf8");
+    const beforeMirror = fs.readFileSync(keychainMirrorFile, "utf8");
+    const rename = fs.renameSync;
+    fs.renameSync = () => { throw Object.assign(new Error("simulated storage failure"), { code: "EIO" }); };
+    try {
+      assert.throws(() => rememberTrustedPhone(state, "new-phone", "new-key"), /storage failure/);
+    } finally {
+      fs.renameSync = rename;
+    }
+    assert.equal(fs.readFileSync(canonicalStateFile, "utf8"), before);
+    assert.equal(fs.readFileSync(keychainMirrorFile, "utf8"), beforeMirror);
+    assert.equal(fs.readdirSync(path.dirname(canonicalStateFile)).some((file) => file.endsWith(".tmp")), false);
+  });
+});
+
 function makeDeviceState(overrides = {}) {
   return {
     version: 1,

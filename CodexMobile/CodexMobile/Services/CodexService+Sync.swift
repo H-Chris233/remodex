@@ -43,6 +43,7 @@ extension CodexService {
         threadListSyncTask = Task { [weak self] in
             while let self, !Task.isCancelled {
                 await self.syncThreadsList()
+                Task { @MainActor [weak self] in await self?.refreshDesktopSidebar() }
                 await self.refreshInactiveRunningBadgeThreads()
                 let interval = self.isAppInForeground ? listIntervalForegroundNs : listIntervalBackgroundNs
                 try? await Task.sleep(nanoseconds: interval)

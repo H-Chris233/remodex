@@ -1688,6 +1688,7 @@ final class TurnViewModel {
         codex: CodexService,
         draftThreadID: String,
         preferredProjectPath: String?,
+        preferredProjectId: String? = nil,
         runtimeProvider: CodexRuntimeProvider = .codex,
         openCodeModelID: String? = nil,
         openCodeVariantID: String? = nil,
@@ -1726,6 +1727,7 @@ final class TurnViewModel {
                 } else {
                     thread = try await codex.startThreadIfReady(
                         preferredProjectPath: preferredProjectPath,
+                        preferredProjectId: preferredProjectId,
                         rootlessChatPromptHint: rootlessChatPromptHint,
                         runtimeProvider: runtimeProvider,
                         openCodeModelID: openCodeModelID,

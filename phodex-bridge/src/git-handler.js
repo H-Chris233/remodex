@@ -3054,6 +3054,8 @@ async function resolveLocalCheckoutRoot(cwd) {
 module.exports = {
   handleGitRequest,
   gitStatus,
+  registeredWorktrees,
+  resolveLocalCheckoutRoot,
   __test: {
     gitGenerateCommitMessage,
     gitGeneratePullRequestDraft,

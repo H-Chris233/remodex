@@ -211,6 +211,9 @@ struct ContentView: View {
                         scheduleSidebarPrewarmIfNeeded()
                     }
                 } else if phase == .background {
+                    if let requestId = codex.pairingApproval?.requestId {
+                        Task { await codex.cancelPairingOnPhone(requestId: requestId) }
+                    }
                     resetSavedMacWakeRecoveryState()
                     teardownSidebarPrewarm()
                 }
@@ -424,7 +427,13 @@ struct ContentView: View {
 
     @ViewBuilder
     private var rootContent: some View {
-        if !hasSeenOnboarding {
+        if let approval = codex.pairingApproval {
+            PairingApprovalView(
+                approval: approval,
+                onConfirm: { codex.confirmPairingOnPhone(requestId: approval.requestId) },
+                onCancel: { Task { await codex.cancelPairingOnPhone(requestId: approval.requestId) } }
+            )
+        } else if !hasSeenOnboarding {
             OnboardingView(
                 onScanQRCode: finishOnboardingAndShowScanner,
                 onPairWithCode: finishOnboardingAndShowPairingCode
@@ -653,10 +662,11 @@ struct ContentView: View {
             onOpenTerminal: {
                 openTerminalFromSidebar(preferredWorkingDirectory: nil)
             },
-            onOpenNewChatDraft: { source, preferredProjectPath, preferredRuntimeProvider in
+            onOpenNewChatDraft: { source, preferredProjectPath, preferredRuntimeProvider, preferredProjectId in
                 openNewChatDraftFromSidebar(
                     source: source,
                     preferredProjectPath: preferredProjectPath,
+                    preferredProjectId: preferredProjectId,
                     preferredRuntimeProvider: preferredRuntimeProvider
                 )
             },
@@ -1304,12 +1314,14 @@ struct ContentView: View {
     private func openNewChatDraftFromSidebar(
         source: NewChatDraftSource,
         preferredProjectPath: String?,
+        preferredProjectId: String? = nil,
         preferredRuntimeProvider: CodexRuntimeProvider? = nil
     ) {
         let route = NewChatDraftRoute(
             id: "new-chat-draft-\(UUID().uuidString)",
             preferredProjectPath: preferredProjectPath,
             source: source,
+            preferredProjectId: preferredProjectId,
             preferredRuntimeProvider: preferredRuntimeProvider
         )
         isOpeningNewChatFromSidebar = false
@@ -1661,6 +1673,7 @@ struct ContentView: View {
     // Blocks lower-priority sheets while onboarding, pairing, paywall, or root alerts own the screen.
     private var canPresentDeferredRootSheet: Bool {
         scenePhase == .active
+            && codex.pairingApproval == nil
             && hasSeenOnboarding
             && !isShowingManualScanner
             && !shouldShowQRScanner

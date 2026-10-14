@@ -8,6 +8,12 @@ import XCTest
 @testable import CodexMobile
 
 final class QRScannerPairingValidatorTests: XCTestCase {
+    func testVersionTwoQRDoesNotDowngradeTheApprovalProtocol() {
+        guard case .bridgeUpdateRequired = validatePairingQRCode(pairingQRCode(v: 2, expiresAt: 1_900_000_000_000)) else {
+            return XCTFail("v2 cannot bypass local approval.")
+        }
+    }
+
     func testVersionMismatchRequiresBridgeUpdateBeforeScanning() {
         let result = validatePairingQRCode(
             pairingQRCode(

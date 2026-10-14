@@ -23,8 +23,11 @@ const {
 } = require("../src");
 const { version } = require("../package.json");
 const { runWindowsServiceCommand } = require("../src/windows-service");
+const { readPendingPairingApproval, submitPairingDecision } = require("../src/pairing-approval");
 
 const defaultDeps = {
+  submitPairingDecision,
+  readPendingPairingApproval,
   runWindowsServiceCommand,
   getMacOSBridgeServiceStatus,
   printMacOSBridgePairingQr,
@@ -73,7 +76,15 @@ async function main({
   exitImpl = process.exit,
   deps = defaultDeps,
 } = {}) {
-  const { command, jsonOutput, watchThreadId } = parseCliArgs(argv.slice(2));
+  const { command, jsonOutput, watchThreadId, fingerprint } = parseCliArgs(argv.slice(2));
+
+  if (command === "approve-pairing" || command === "reject-pairing") {
+    const result = await (deps.submitPairingDecision || submitPairingDecision)({
+      requestId: watchThreadId, fingerprint, decision: command === "approve-pairing" ? "approve" : "reject",
+    });
+    consoleImpl.log(jsonOutput ? JSON.stringify(result) : `[remodex] Pairing ${result.stage === "rejected" ? "rejected" : "approved on this computer; confirm on the iPhone"}.`);
+    return;
+  }
 
   if (isVersionCommand(command)) {
     emitVersion({ jsonOutput, consoleImpl });
@@ -219,6 +230,10 @@ async function main({
   }
 
   if (command === "status") {
+    if (platform !== "darwin") {
+      consoleImpl.log(JSON.stringify({ pendingPairingApproval: (deps.readPendingPairingApproval || readPendingPairingApproval)() }));
+      return;
+    }
     assertMacOSCommand(command, {
       platform,
       consoleImpl,
@@ -303,6 +318,7 @@ async function main({
   consoleImpl.error(`Unknown command: ${command}`);
   consoleImpl.error(
     "Usage: remodex up | remodex run | remodex start | remodex restart | remodex qr | remodex pair | remodex stop | remodex uninstall-service | remodex status | "
+    + "remodex approve-pairing <requestId> --fingerprint <fullFingerprint> | remodex reject-pairing <requestId> | "
     + "remodex reset-pairing | remodex resume | remodex watch [threadId] | remodex --version | "
     + "append --json to start/restart/qr/pair/stop/uninstall-service/status/reset-pairing/resume for machine-readable output"
   );
@@ -312,8 +328,14 @@ async function main({
 function parseCliArgs(rawArgs) {
   const positionals = [];
   let jsonOutput = false;
+  let fingerprint = "";
 
-  for (const arg of rawArgs) {
+  for (let index = 0; index < rawArgs.length; index += 1) {
+    const arg = rawArgs[index];
+    if (arg === "--fingerprint") {
+      fingerprint = rawArgs[++index] || "";
+      continue;
+    }
     if (arg === "--json") {
       jsonOutput = true;
       continue;
@@ -326,6 +348,7 @@ function parseCliArgs(rawArgs) {
     command: positionals[0] || "up",
     jsonOutput,
     watchThreadId: positionals[1] || "",
+    fingerprint,
   };
 }
 
@@ -365,6 +388,7 @@ function emitJson(payload) {
 function sanitizeBridgeServiceStatusForOutput(status = {}) {
   const sanitized = {
     ...status,
+    pendingPairingApproval: readPendingPairingApproval(),
     daemonConfig: sanitizeDaemonConfigForOutput(status.daemonConfig),
     pairingSession: sanitizePairingSessionForOutput(status.pairingSession),
   };

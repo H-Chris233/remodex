@@ -31,7 +31,10 @@ struct SidebarThreadListView: View {
     var onArchiveToggleThread: ((CodexThread) -> Void)? = nil
     var onDeleteThread: ((CodexThread) -> Void)? = nil
     @Environment(CodexService.self) private var codex
-    @AppStorage(SidebarProjectExpansionState.collapsedProjectGroupIDsStorageKey) private var collapsedProjectGroupIDsStorage = ""
+    private var collapsedProjectGroupIDsStorage: String {
+        get { codex.sidebarCollapsedProjectIDsStorage }
+        nonmutating set { codex.sidebarCollapsedProjectIDsStorage = newValue }
+    }
     @State private var expandedProjectGroupIDs: Set<String> = []
     @State private var knownProjectGroupIDs: Set<String> = []
     @State private var hasInitializedProjectGroupExpansion = false
@@ -44,13 +47,13 @@ struct SidebarThreadListView: View {
     var body: some View {
         LazyVStack(alignment: .leading, spacing: 0) {
 
-            if threads.isEmpty && !isFiltering {
+            if threads.isEmpty && (taskViewMode == .activity || groups.isEmpty) && !isFiltering {
                 Text(isConnected ? emptyStateTitle : "Connect to view conversations")
                     .foregroundStyle(.secondary)
                     .font(AppFont.subheadline())
                     .padding(.horizontal, 16)
                     .padding(.top, 20)
-            } else if (taskViewMode == .activity ? activityThreads.isEmpty : groups.flatMap(\.threads).isEmpty)
+            } else if (taskViewMode == .activity ? activityThreads.isEmpty : groups.isEmpty)
                         && isFiltering {
                 Text(emptyFilterTitle)
                     .foregroundStyle(.secondary)
@@ -67,7 +70,14 @@ struct SidebarThreadListView: View {
                 }
                 .id("\(codex.currentMacScopedPersistenceDeviceId ?? "local"):\(codex.isConnected)")
             } else {
-                ForEach(groups) { group in
+                ForEach(groups.filter { $0.kind == .pinned }) { group in
+                    groupSection(group)
+                }
+                ForEach(codex.desktopSidebarSnapshot?.sections ?? []) { section in
+                    let sectionGroups = section.projectIds.compactMap { id in groups.first { $0.desktopProject?.id == id } }
+                    if !sectionGroups.isEmpty { desktopSection(section, groups: sectionGroups) }
+                }
+                ForEach(groups.filter { $0.kind != .pinned && !sectionedProjectIDs.contains($0.desktopProject?.id ?? "") }) { group in
                     groupSection(group)
                 }
             }
@@ -101,6 +111,27 @@ struct SidebarThreadListView: View {
         .onChange(of: selectedSubagentAncestorIDs) { _, _ in
             revealSelectedThreadProjectGroup()
             revealSelectedSubagentAncestors()
+        }
+    }
+
+    private var sectionedProjectIDs: Set<String> {
+        Set((codex.desktopSidebarSnapshot?.sections ?? []).flatMap(\.projectIds))
+    }
+
+    private func desktopSection(_ section: CodexDesktopSidebarSection, groups: [SidebarThreadGroup]) -> some View {
+        let expanded = isFiltering || !codex.desktopCollapsedSectionIDs.contains(section.id)
+        return VStack(alignment: .leading, spacing: 0) {
+            SidebarSectionHeader(label: section.name, labelWeight: .semibold, onToggle: {
+                var collapsed = codex.desktopCollapsedSectionIDs
+                if collapsed.contains(section.id) { collapsed.remove(section.id) } else { collapsed.insert(section.id) }
+                withAnimation(.snappy(duration: 0.22)) { codex.setDesktopCollapsedSections(collapsed) }
+            }, leadingIcon: { EmptyView() }, labelAccessory: {
+                SidebarSectionExpansionChevron(isExpanded: expanded)
+            }, trailing: { EmptyView() })
+            .padding(.horizontal)
+            if expanded {
+                ForEach(groups) { group in groupSection(group) }
+            }
         }
     }
 
@@ -147,7 +178,7 @@ struct SidebarThreadListView: View {
     }
 
     private func projectGroupSection(_ group: SidebarThreadGroup) -> some View {
-        let isExpanded = expandedProjectGroupIDs.contains(group.id)
+        let isExpanded = isFiltering || expandedProjectGroupIDs.contains(group.id)
 
         // Skip the hierarchy / preview-cap calculations entirely when the
         // group is collapsed. They were previously recomputed on every body
@@ -208,20 +239,53 @@ struct SidebarThreadListView: View {
                         revealedProjectGroupIDs.insert(group.id)
                     }
                 }
+                if let project = group.desktopProject {
+                    desktopProjectLoadingContent(project.id, hasVisibleThreads: !visibleRootThreads.isEmpty, showsLocalMore: shouldShowMoreButton)
+                }
             }
+        }
+        .task(id: "\(isConnected):\(isActivityVisible):\(isFiltering):\(codex.desktopSidebarEpoch):\(codex.desktopProjectLoadStates[group.desktopProject?.id ?? ""]?.hasLoadedPage ?? false)") {
+            guard isActivityVisible, !isFiltering, let project = group.desktopProject else { return }
+            await codex.loadDesktopProjectThreads(project.id)
+        }
+    }
+
+    @ViewBuilder
+    private func desktopProjectLoadingContent(_ projectId: String, hasVisibleThreads: Bool, showsLocalMore: Bool) -> some View {
+        let state = codex.desktopProjectLoadStates[projectId] ?? CodexDesktopProjectLoadState()
+        if state.isLoading {
+            ProgressView().padding(.vertical, 8)
+        } else if state.errorMessage != nil {
+            Button("Could not load chats. Retry") {
+                Task { await codex.loadDesktopProjectThreads(projectId, loadMore: true) }
+            }
+            .font(AppFont.caption())
+        } else if !state.hasLoadedPage && !hasVisibleThreads {
+            Text(isConnected ? "Chats not loaded" : "Connect to load chats")
+                .font(AppFont.subheadline()).foregroundStyle(.secondary).padding(.vertical, 8)
+        } else if !hasVisibleThreads && state.isComplete {
+            Text(state.isConfirmedEmpty ? "No conversations" : "No visible conversations")
+                .font(AppFont.subheadline()).foregroundStyle(.secondary).padding(.vertical, 8)
+        }
+        if state.nextCursor != nil && !showsLocalMore && !isFiltering {
+            Button("Load more chats") {
+                Task { await codex.loadDesktopProjectThreads(projectId, loadMore: true) }
+            }
+            .font(AppFont.caption())
+            .disabled(state.isLoading || !isConnected)
         }
     }
 
     private func projectHeader(_ group: SidebarThreadGroup) -> some View {
         SidebarProjectSectionHeader(
             group: group,
-            isExpanded: expandedProjectGroupIDs.contains(group.id),
+            isExpanded: isFiltering || expandedProjectGroupIDs.contains(group.id),
             isConnected: isConnected,
             isCreatingThread: isCreatingThread,
             onToggle: { toggleProjectGroupExpansion(group.id) },
             onCreate: { onCreateThreadInProjectGroup(group) },
             onArchive: onArchiveProjectGroup.map { handler in { handler(group) } },
-            onDelete: onDeleteProjectGroup.map { handler in { handler(group) } },
+            onDelete: group.desktopProject == nil ? onDeleteProjectGroup.map { handler in { handler(group) } } : nil,
             onManageWorktrees: group.kind == .project && group.iconSystemName != "remodex.worktree"
                 ? onManageProjectWorktrees.map { handler in { handler(group) } }
                 : nil

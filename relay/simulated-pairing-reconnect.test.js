@@ -16,6 +16,7 @@ const {
   generateKeyPairSync,
   hkdfSync,
   sign,
+  verify,
 } = require("crypto");
 const WebSocket = require("ws");
 const {
@@ -24,6 +25,7 @@ const {
   SECURE_PROTOCOL_VERSION,
   createBridgeSecureTransport,
   nonceForDirection,
+  buildPairingControlTranscript,
 } = require("../phodex-bridge/src/secure-transport");
 const { createRelayServer } = require("./server");
 
@@ -42,6 +44,11 @@ test("simulated relay harness covers QR bootstrap, trusted resolve, and reconnec
       relayUrl: `ws://127.0.0.1:${port}/relay`,
       displayName: "Simulated Mac",
       persistTrustedPhone: false,
+      onPairingApprovalChange(request) {
+        if (request?.stage === "awaitingComputer") {
+          queueMicrotask(() => secureTransport.decidePairingApproval({ ...request, decision: "approve" }));
+        }
+      },
       deviceState: {
         macDeviceId,
         macIdentityPrivateKey: macIdentity.privateKey,
@@ -62,6 +69,7 @@ test("simulated relay harness covers QR bootstrap, trusted resolve, and reconnec
       },
     });
 
+    secureTransport.createPairingPayload();
     macSocket = new WebSocket(`ws://127.0.0.1:${port}/relay/${sessionId}`, {
       headers: {
         "x-role": "mac",
@@ -69,7 +77,7 @@ test("simulated relay harness covers QR bootstrap, trusted resolve, and reconnec
         "x-mac-identity-public-key": macIdentity.publicKey,
         "x-machine-name": "Simulated Mac",
         "x-pairing-code": pairingCode,
-        "x-pairing-version": "2",
+        "x-pairing-version": String(SECURE_PROTOCOL_VERSION),
         "x-pairing-expires-at": String(Date.now() + 60_000),
       },
     });
@@ -226,6 +234,7 @@ class SimulatedPhone {
       clientNonce,
       serverNonce: Buffer.from(serverHello.serverNonce, "base64"),
       expiresAtForTranscript: serverHello.expiresAtForTranscript,
+      pairingRequestId: serverHello.pairingRequestId,
     });
     const phoneAuthTranscript = Buffer.concat([
       transcriptBytes,
@@ -253,8 +262,28 @@ class SimulatedPhone {
       phoneSignature: phoneSignature.toString("base64"),
     }));
 
+    let approvalNonce = "";
+    if (handshakeMode === HANDSHAKE_MODE_QR_BOOTSTRAP) {
+      const approved = JSON.parse(await onceMessage(this.socket));
+      assert.equal(approved.kind, "pairingApproved");
+      approvalNonce = approved.approvalNonce;
+      assert.equal(verify(null, buildPairingControlTranscript(transcriptBytes, "pairing-approved", approvalNonce),
+        { key: { crv: "Ed25519", kty: "OKP", x: base64ToBase64Url(this.macIdentityPublicKey) }, format: "jwk" },
+        Buffer.from(approved.macSignature, "base64")), true);
+      this.socket.send(JSON.stringify({
+        kind: "clientPairingConfirm", sessionId: this.sessionId,
+        phoneDeviceId: this.phoneIdentity.phoneDeviceId, keyEpoch: serverHello.keyEpoch,
+        requestId: serverHello.pairingRequestId, approvalNonce,
+        phoneSignature: sign(null, buildPairingControlTranscript(transcriptBytes, "client-pairing-confirm", approvalNonce),
+          { key: { crv: "Ed25519", kty: "OKP", d: base64ToBase64Url(this.phoneIdentity.phoneIdentityPrivateKey),
+            x: base64ToBase64Url(this.phoneIdentity.phoneIdentityPublicKey) }, format: "jwk" }).toString("base64"),
+      }));
+    }
     const secureReady = JSON.parse(await onceMessage(this.socket));
     assert.equal(secureReady.kind, "secureReady");
+    assert.equal(verify(null, buildPairingControlTranscript(transcriptBytes, "secure-ready", approvalNonce),
+      { key: { crv: "Ed25519", kty: "OKP", x: base64ToBase64Url(this.macIdentityPublicKey) }, format: "jwk" },
+      Buffer.from(secureReady.macSignature, "base64")), true);
 
     const keys = deriveSessionKeys({
       macDeviceId: this.macDeviceId,
@@ -526,6 +555,7 @@ function buildTranscriptBytes({
   clientNonce,
   serverNonce,
   expiresAtForTranscript,
+  pairingRequestId = "",
 }) {
   return Buffer.concat([
     encodeLengthPrefixedUTF8("remodex-e2ee-v1"),
@@ -542,6 +572,7 @@ function buildTranscriptBytes({
     encodeLengthPrefixedBuffer(clientNonce),
     encodeLengthPrefixedBuffer(serverNonce),
     encodeLengthPrefixedUTF8(String(expiresAtForTranscript)),
+    encodeLengthPrefixedUTF8(pairingRequestId),
   ]);
 }
 

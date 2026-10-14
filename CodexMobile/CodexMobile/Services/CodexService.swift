@@ -598,6 +598,10 @@ final class CodexService {
     var trustedReconnectFailureCount = 0
     var secureConnectionState: CodexSecureConnectionState = .notPaired
     var secureMacFingerprint: String?
+    var pairingApproval: CodexPairingApprovalPresentation?
+    @ObservationIgnored var pairingConfirmationContinuation: CheckedContinuation<Void, Error>?
+    @ObservationIgnored var pairingConfirmationTimeoutTask: Task<Void, Never>?
+    @ObservationIgnored var pairingCancelMessage: SecureClientPairingDecision?
     // Keeps the bridge-update UX visible even if connection cleanup resets secure transport state.
     var bridgeUpdatePrompt: CodexBridgeUpdatePrompt?
     var hasPresentedServiceTierBridgeUpdatePrompt = false
@@ -852,6 +856,16 @@ final class CodexService {
     @ObservationIgnored var associatedManagedWorktreePathByThreadID: [String: String] = [:]
     @ObservationIgnored var authoritativeProjectPathByThreadID: [String: String] = [:]
     var pinnedThreadIDs: [String] = []
+    var desktopSidebarSnapshot: CodexDesktopSidebarSnapshot?
+    var desktopProjectLoadStates: [String: CodexDesktopProjectLoadState] = [:]
+    var desktopCollapsedProjectIDs: Set<String> = []
+    var desktopCollapsedSectionIDs: Set<String> = []
+    var legacySidebarCollapsedProjectIDsStorage = ""
+    @ObservationIgnored var desktopSidebarReadTask: Task<Void, Never>?
+    @ObservationIgnored var desktopProjectLoadTasks: [String: Task<Bool, Never>] = [:]
+    var desktopSidebarEpoch = UUID()
+    @ObservationIgnored var desktopSidebarLastReadAt: Date?
+    @ObservationIgnored var supportsDesktopSidebar = true
     @ObservationIgnored var pinnedThreadSnapshotsByRootID: [String: [CodexThread]] = [:]
     // Sidebar rows read this directly, so keep it observable even when thread metadata is unchanged.
     var snapshotOnlyPinnedThreadIDs: Set<String> = []

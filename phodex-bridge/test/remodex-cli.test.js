@@ -11,6 +11,32 @@ const path = require("path");
 const { version } = require("../package.json");
 const { main, runCli } = require("../bin/remodex");
 
+test("pairing decisions route to the local service before platform lifecycle dispatch", async () => {
+  for (const platform of ["win32", "darwin", "linux"]) {
+    const calls = [];
+    const output = [];
+    await main({ argv: ["node", "remodex", "approve-pairing", "a".repeat(32), "--fingerprint", "b".repeat(64), "--json"], platform,
+      consoleImpl: { log: (line) => output.push(JSON.parse(line)) }, deps: {
+        runWindowsServiceCommand: () => assert.fail("Pairing approval must not dispatch a lifecycle command"),
+        submitPairingDecision: async (decision) => { calls.push(decision); return { ok: true, requestId: decision.requestId, stage: "awaitingPhone" }; },
+      } });
+    assert.deepEqual(calls, [{ requestId: "a".repeat(32), fingerprint: "b".repeat(64), decision: "approve" }]);
+    assert.equal(output[0].stage, "awaitingPhone");
+  }
+});
+
+test("pairing rejection uses an explicit request and waits for the live result", async () => {
+  const output = [];
+  await main({ argv: ["node", "remodex", "reject-pairing", "a".repeat(32)], platform: "win32",
+    consoleImpl: { log: (line) => output.push(line) }, deps: {
+      submitPairingDecision: async (decision) => { assert.equal(decision.decision, "reject"); return { stage: "rejected" }; },
+    } });
+  assert.match(output[0], /rejected/);
+  await assert.rejects(main({ argv: ["node", "remodex", "approve-pairing"], deps: {
+    submitPairingDecision: async () => { throw new Error("No matching live request"); },
+  } }), /No matching live request/);
+});
+
 test("remodex --version prints the package version", () => {
   const cliPath = path.join(__dirname, "..", "bin", "remodex.js");
   const output = execFileSync(process.execPath, [cliPath, "--version"], {

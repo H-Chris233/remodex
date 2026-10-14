@@ -13,7 +13,7 @@ struct BridgeCLIInvocation {
 
     // Executes the actual CLI entrypoint via an absolute Node binary so GUI PATH drift does not break nvm installs.
     func command(_ arguments: [String]) -> String {
-        ([shellQuoted(nodePath), shellQuoted(remodexPath)] + arguments).joined(separator: " ")
+        ([shellQuoted(nodePath), shellQuoted(remodexPath)] + arguments.map(shellQuoted)).joined(separator: " ")
     }
 }
 
@@ -174,6 +174,21 @@ final class BridgeControlService {
         )
     }
 
+    // The one-second approval poll reads only local state, without shell or npm work.
+    func loadPairingApproval(stateDirectoryPath: String?) -> BridgePairingApproval? {
+        let directory = stateDirectoryPath.map { URL(fileURLWithPath: $0) } ?? defaultStateDirectory
+        let request: BridgePairingApproval? = readStateFile(named: "pairing-approval/request.json", in: directory)
+        return request?.isValid == true ? request : nil
+    }
+
+    func decidePairing(_ request: BridgePairingApproval, approve: Bool, relayOverride: String?) async throws {
+        guard request.isValid else { throw BridgeControlError.invalidSnapshot("The pairing request expired. Generate a new QR code.") }
+        let invocation = try await resolveCLIInvocation()
+        var arguments = [approve ? "approve-pairing" : "reject-pairing", request.requestId, "--json"]
+        if approve { arguments += ["--fingerprint", request.fingerprint] }
+        _ = try await runner.run(command: invocation.command(arguments), environment: commandEnvironment(relayOverride: relayOverride))
+    }
+
     func resumeLastThread(relayOverride: String?) async throws {
         let invocation = try await resolveCLIInvocation()
         _ = try await runner.run(
@@ -263,7 +278,8 @@ final class BridgeControlService {
             pairingSession: pairingSession,
             trustedDevice: trustedDevice,
             stdoutLogPath: stdoutLogPath,
-            stderrLogPath: stderrLogPath
+            stderrLogPath: stderrLogPath,
+            pendingPairingApproval: loadPairingApproval(stateDirectoryPath: stateDirectory.path)
         )
     }
 
@@ -289,7 +305,8 @@ final class BridgeControlService {
             pairingSession: snapshot.pairingSession,
             trustedDevice: trustedDevice,
             stdoutLogPath: snapshot.stdoutLogPath,
-            stderrLogPath: snapshot.stderrLogPath
+            stderrLogPath: snapshot.stderrLogPath,
+            pendingPairingApproval: snapshot.pendingPairingApproval
         )
     }
 

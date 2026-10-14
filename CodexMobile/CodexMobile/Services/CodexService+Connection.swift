@@ -150,6 +150,7 @@ extension CodexService {
 
     // Closes the socket and fails any in-flight requests.
     func disconnect(preserveReconnectIntent: Bool = false) async {
+        resetDesktopSidebarRequests()
         cancelCurrentSocketConnection()
 
         isConnected = false

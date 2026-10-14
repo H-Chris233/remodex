@@ -104,6 +104,7 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
     var createdAt: Date?
     var updatedAt: Date?
     var cwd: String?
+    var projectId: String?
     // Checkout that owns `cwd` when the chat runs inside a Codex-managed worktree. The bridge
     // resolves it from the worktree's Git link so the sidebar can keep worktree chats inside the
     // project they were cut from instead of showing a second, look-alike project row.
@@ -139,6 +140,7 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         createdAt: Date? = nil,
         updatedAt: Date? = nil,
         cwd: String? = nil,
+        projectId: String? = nil,
         worktreeOriginPath: String? = nil,
         metadata: [String: JSONValue]? = nil,
         forkedFromThreadId: String? = nil,
@@ -165,6 +167,7 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.cwd = Self.normalizeProjectPath(cwd)
+        self.projectId = Self.normalizeIdentifier(projectId)
         self.worktreeOriginPath = Self.normalizeProjectPath(worktreeOriginPath)
         self.metadata = metadata
         self.forkedFromThreadId = Self.normalizeIdentifier(forkedFromThreadId)
@@ -197,6 +200,7 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         case updatedAt
         case updatedAtSnake = "updated_at"
         case cwd
+        case projectId
         case cwdSnake = "current_working_directory"
         case cwdWorkingDirectory = "working_directory"
         case worktreeOriginPath
@@ -247,6 +251,7 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         createdAt = try Self.decodeDateIfPresent(from: container, keys: [.createdAt, .createdAtSnake])
         updatedAt = try Self.decodeDateIfPresent(from: container, keys: [.updatedAt, .updatedAtSnake])
         metadata = try container.decodeIfPresent([String: JSONValue].self, forKey: .metadata)
+        projectId = Self.decodeIdentifierIfPresent(from: container, keys: [.projectId])
         cwd = Self.decodeStringIfPresent(from: container, keys: [.cwd, .cwdSnake, .cwdWorkingDirectory])
             ?? Self.decodeProjectPath(from: metadata)
         worktreeOriginPath = Self.decodeStringIfPresent(
@@ -337,6 +342,7 @@ struct CodexThread: Identifiable, Codable, Hashable, Sendable {
         try container.encodeIfPresent(createdAt, forKey: .createdAt)
         try container.encodeIfPresent(updatedAt, forKey: .updatedAt)
         try container.encodeIfPresent(Self.normalizeProjectPath(cwd), forKey: .cwd)
+        try container.encodeIfPresent(projectId, forKey: .projectId)
         try container.encodeIfPresent(Self.normalizeProjectPath(worktreeOriginPath), forKey: .worktreeOriginPath)
         try container.encodeIfPresent(metadata, forKey: .metadata)
         try container.encodeIfPresent(Self.normalizeIdentifier(forkedFromThreadId), forKey: .forkedFromThreadId)

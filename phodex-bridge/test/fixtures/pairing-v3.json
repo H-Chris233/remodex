@@ -1,0 +1,30 @@
+{
+  "note": "Deterministic test keys only; never use for real pairing.",
+  "input": {
+    "sessionId": "pairing-v3-vector-session",
+    "protocolVersion": 3,
+    "handshakeMode": "qr_bootstrap",
+    "keyEpoch": 7,
+    "macDeviceId": "vector-mac",
+    "phoneDeviceId": "vector-phone",
+    "macIdentityPublicKey": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w=",
+    "phoneIdentityPublicKey": "gTl3Dqh9F19Wo1Rmw0x+zMuNipG07jeiXfYPW4/Js5Q=",
+    "macEphemeralPublicKey": "Xf7dO2vUf2+ijuFdlp1bsOpTd01Ii9r53xxuASSz7yI=",
+    "phoneEphemeralPublicKey": "rAGyIJ6GNU+4UyN7XeD0+rE8f8v0M6YcAZNpYX/s8Qs=",
+    "clientNonce": "BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQU=",
+    "serverNonce": "BgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgY=",
+    "expiresAtForTranscript": 1900000000000,
+    "pairingRequestId": "0123456789abcdef0123456789abcdef"
+  },
+  "macPrivateSeed": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+  "phonePrivateSeed": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+  "transcriptBase64": "AAAAD3JlbW9kZXgtZTJlZS12MQAAABlwYWlyaW5nLXYzLXZlY3Rvci1zZXNzaW9uAAAAATMAAAAMcXJfYm9vdHN0cmFwAAAAATcAAAAKdmVjdG9yLW1hYwAAAAx2ZWN0b3ItcGhvbmUAAAAgiojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1wAAAAggTl3Dqh9F19Wo1Rmw0x+zMuNipG07jeiXfYPW4/Js5QAAAAgXf7dO2vUf2+ijuFdlp1bsOpTd01Ii9r53xxuASSz7yIAAAAgrAGyIJ6GNU+4UyN7XeD0+rE8f8v0M6YcAZNpYX/s8QsAAAAgBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUAAAAgBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYAAAANMTkwMDAwMDAwMDAwMAAAACAwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZg==",
+  "fingerprint": "49acbf8f25315f1c529871a34d9301573ad7c114b05523df12b1068a9897711b",
+  "approvalNonce": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+  "macHandshake": "U0BlY14Sm3StPzs+CjVNq78fLBron+JhTshdqRatRRXuTwkub+tK0E0j4+1bSEvT9ln/8cb9kk5pJjv3DEkKAA==",
+  "phoneAuth": "sPSfLhyqO/PcPNWAgdSyUohPEt/KioENPteLzJQEMzcKpN+DccssbZrl6FHQ0FisurBcFKCS+IzZQ40tMFsECw==",
+  "macApproval": "XapiKoJqTsgWlpwXmwiyaqWm7xsejg+s6Gz0EUx+t82Of61BBV85kX994yJ8rvxdP8z6AydYz22Ah295xYGeCw==",
+  "phoneConfirm": "jPyEs9XizEq4ULVGKVPoFeMvbe2AvGbf2ET4wcIpCCqexVNAM+ErZLCRALkdlWPyC4YcfmT5Xl/ZzGhBQpvUAw==",
+  "phoneCancel": "x4MDV3u6djB7EWDhPOYwWFMxFGm9bJsIcPSYAv6i5oxeXdDoiHdsvfyLin8Cy/EJrScTYVH7/0ws9/EHrsAjDw==",
+  "macReady": "4A3jvDh9aDem6T6xA3M6kuVcjLP3VJChxKMx2mHZ/SfBHgTF74mwkvZT0eCImEPffXQKVCR1DW+0XuC2XWXUDA=="
+}

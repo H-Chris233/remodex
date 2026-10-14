@@ -14,6 +14,7 @@ extension CodexService {
     // named after the macOS/Windows username).
     func startThreadIfReady(
         preferredProjectPath: String? = nil,
+        preferredProjectId: String? = nil,
         rootlessChatPromptHint: String? = nil,
         pendingComposerAction: CodexPendingThreadComposerAction? = nil,
         runtimeOverride: CodexThreadRuntimeOverride? = nil,
@@ -33,6 +34,7 @@ extension CodexService {
         if let pendingComposerAction {
             return try await startThread(
                 preferredProjectPath: resolvedProjectPath,
+                preferredProjectId: preferredProjectId,
                 pendingComposerAction: pendingComposerAction,
                 runtimeOverride: runtimeOverride,
                 runtimeProvider: runtimeProvider,
@@ -43,6 +45,7 @@ extension CodexService {
 
         return try await startThread(
             preferredProjectPath: resolvedProjectPath,
+            preferredProjectId: preferredProjectId,
             runtimeOverride: runtimeOverride,
             runtimeProvider: runtimeProvider,
             openCodeModelID: openCodeModelID,

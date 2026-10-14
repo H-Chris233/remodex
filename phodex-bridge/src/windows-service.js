@@ -8,6 +8,7 @@ const { readBridgeConfig } = require("./codex-desktop-refresher");
 const state = require("./daemon-state");
 const { printQR } = require("./qr");
 const { resetBridgeTrustState } = require("./secure-device-state");
+const { readPendingPairingApproval } = require("./pairing-approval");
 
 function taskName(env = process.env) {
   const root = path.resolve(state.resolveRemodexStateDir({ env })).toLowerCase();
@@ -79,6 +80,7 @@ function getWindowsServiceStatus({ env = process.env, task = invokeTask, now = D
     taskRunning: scheduler.running,
     lastTaskResult: scheduler.lastTaskResult ?? null,
     bridgeAlive,
+    pendingPairingApproval: readPendingPairingApproval({ env, now }),
     connectionStatus: bridgeAlive ? bridge.connectionStatus : "disconnected",
     codexLaunchState: bridgeAlive ? bridge.codexLaunchState : "stopped",
     lastError: bridge?.lastError || "",

@@ -40,6 +40,7 @@ enum WorktreeFlowCoordinator {
     // Errors: base-branch resolution, Git worktree creation, or `thread/start` failures.
     static func startNewWorktreeChat(
         preferredProjectPath: String,
+        preferredProjectId: String? = nil,
         baseBranch requestedBaseBranch: String? = nil,
         codex: CodexService,
         runtimeProvider: CodexRuntimeProvider = .codex,
@@ -74,6 +75,7 @@ enum WorktreeFlowCoordinator {
         do {
             let thread = try await codex.startThreadIfReady(
                 preferredProjectPath: result.worktreePath,
+                preferredProjectId: preferredProjectId,
                 runtimeProvider: runtimeProvider,
                 openCodeModelID: openCodeModelID,
                 openCodeVariantID: openCodeVariantID

@@ -569,8 +569,6 @@ extension CodexService {
                     if decoded.isSecure {
                         // Secure control or encrypted envelope — must stay on MainActor.
                         self.processIncomingWireText(text)
-                    } else if let rpcResult = decoded.rpcResult {
-                        self.handleDecodedRPCResult(rpcResult, rawText: text)
                     }
                 }
 
@@ -652,8 +650,6 @@ extension CodexService {
                         let decoded = decodedPayload.classification
                         if decoded.isSecure {
                             self.processIncomingWireText(text)
-                        } else if let rpcResult = decoded.rpcResult {
-                            self.handleDecodedRPCResult(rpcResult, rawText: text)
                         }
                     }
 

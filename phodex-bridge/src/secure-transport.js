@@ -22,8 +22,8 @@ const {
   rememberTrustedPhone,
 } = require("./secure-device-state");
 
-const PAIRING_QR_VERSION = 2;
-const SECURE_PROTOCOL_VERSION = 2;
+const PAIRING_QR_VERSION = 3;
+const SECURE_PROTOCOL_VERSION = 3;
 const HANDSHAKE_TAG = "remodex-e2ee-v1";
 const HANDSHAKE_MODE_QR_BOOTSTRAP = "qr_bootstrap";
 const HANDSHAKE_MODE_TRUSTED_RECONNECT = "trusted_reconnect";
@@ -40,7 +40,10 @@ function createBridgeSecureTransport({
   displayName = "",
   onTrustedPhoneUpdate = null,
   onSecureSessionReady = null,
+  onPairingApprovalChange = null,
   persistTrustedPhone = true,
+  now = () => Date.now(),
+  rememberTrustedPhoneImpl = rememberTrustedPhone,
 }) {
   let currentDeviceState = deviceState;
   const bridgeDisplayName = normalizeNonEmptyString(displayName);
@@ -50,7 +53,10 @@ function createBridgeSecureTransport({
   // Tracks the highest bridge seq the phone has definitely acked, so replay
   // decisions never depend on best-effort local socket writes.
   let lastRelayedBridgeOutboundSeq = 0;
-  let currentPairingExpiresAt = Date.now() + MAX_PAIRING_AGE_MS;
+  let currentPairingExpiresAt = 0;
+  let pairingGeneration = "";
+  let pairingTimer = null;
+  let completedPairing = null;
   let nextKeyEpoch = 1;
   // Sequence numbers restart at 1 with each bridge process. Namespace them so
   // a phone never mistakes new-process seq 1 for old-process seq 1.
@@ -60,7 +66,9 @@ function createBridgeSecureTransport({
   const outboundBuffer = [];
 
   function createPairingPayload() {
-    currentPairingExpiresAt = Date.now() + MAX_PAIRING_AGE_MS;
+    cancelPendingHandshake();
+    pairingGeneration = randomBytes(16).toString("hex");
+    currentPairingExpiresAt = now() + MAX_PAIRING_AGE_MS;
     return {
       v: PAIRING_QR_VERSION,
       relay: relayUrl,
@@ -96,6 +104,12 @@ function createBridgeSecureTransport({
       return true;
     case "clientAuth":
       handleClientAuth(parsed, sendControlMessage);
+      return true;
+    case "clientPairingConfirm":
+      handleClientPairingConfirm(parsed, sendControlMessage);
+      return true;
+    case "clientPairingCancel":
+      handleClientPairingCancel(parsed, sendControlMessage);
       return true;
     case "resumeState":
       handleResumeState(parsed);
@@ -169,10 +183,18 @@ function createBridgeSecureTransport({
       return;
     }
 
-    if (handshakeMode === HANDSHAKE_MODE_QR_BOOTSTRAP && Date.now() > currentPairingExpiresAt) {
+    if (handshakeMode === HANDSHAKE_MODE_QR_BOOTSTRAP && (!currentPairingExpiresAt || now() >= currentPairingExpiresAt)) {
       sendControlMessage(createSecureError({
         code: "pairing_expired",
         message: "The pairing QR code has expired. Generate a new QR code from the bridge.",
+      }));
+      return;
+    }
+
+    if (pendingHandshake && pendingHandshake.phase !== "authenticating") {
+      sendControlMessage(createSecureError({
+        code: "pairing_busy",
+        message: "A pairing request is already awaiting confirmation on the computer.",
       }));
       return;
     }
@@ -209,6 +231,9 @@ function createBridgeSecureTransport({
     const publicJwk = ephemeral.publicKey.export({ format: "jwk" });
     const serverNonce = randomBytes(32);
     const keyEpoch = nextKeyEpoch;
+    const pairingRequestId = handshakeMode === HANDSHAKE_MODE_QR_BOOTSTRAP
+      ? randomBytes(16).toString("hex")
+      : "";
     const expiresAtForTranscript = handshakeMode === HANDSHAKE_MODE_QR_BOOTSTRAP
       ? currentPairingExpiresAt
       : 0;
@@ -226,6 +251,7 @@ function createBridgeSecureTransport({
       clientNonce,
       serverNonce,
       expiresAtForTranscript,
+      pairingRequestId,
     });
     const macSignature = signTranscript(
       currentDeviceState.macIdentityPrivateKey,
@@ -251,8 +277,12 @@ function createBridgeSecureTransport({
       macEphemeralPublicKey: base64UrlToBase64(publicJwk.x),
       transcriptBytes,
       expiresAtForTranscript,
+      pairingRequestId,
+      pairingGeneration,
+      phase: "authenticating",
+      approvalNonce: "",
+      sendControlMessage,
     };
-    activeSession = null;
 
     sendControlMessage({
       kind: "serverHello",
@@ -269,6 +299,7 @@ function createBridgeSecureTransport({
       macSignature,
       clientNonce: clientNonceBase64,
       displayName: bridgeDisplayName,
+      pairingRequestId,
     });
   }
 
@@ -278,6 +309,11 @@ function createBridgeSecureTransport({
         code: "unexpected_client_auth",
         message: "The bridge did not have a pending secure handshake to finalize.",
       }));
+      return;
+    }
+
+    if (pendingHandshake.phase !== "authenticating") {
+      sendControlMessage(createSecureError({ code: "pairing_busy", message: "Confirm the pending pairing on the computer and iPhone." }));
       return;
     }
 
@@ -291,7 +327,7 @@ function createBridgeSecureTransport({
       || keyEpoch !== pendingHandshake.keyEpoch
       || !phoneSignature
     ) {
-      pendingHandshake = null;
+      clearPendingHandshake();
       sendControlMessage(createSecureError({
         code: "invalid_client_auth",
         message: "The secure client authentication payload was invalid.",
@@ -309,7 +345,7 @@ function createBridgeSecureTransport({
       phoneSignature
     );
     if (!phoneVerified) {
-      pendingHandshake = null;
+      clearPendingHandshake();
       sendControlMessage(createSecureError({
         code: "invalid_phone_signature",
         message: "The iPhone secure signature could not be verified.",
@@ -317,89 +353,227 @@ function createBridgeSecureTransport({
       return;
     }
 
-    const sharedSecret = diffieHellman({
-      privateKey: createPrivateKey({
-        key: {
-          crv: "X25519",
-          d: base64ToBase64Url(pendingHandshake.macEphemeralPrivateKey),
-          kty: "OKP",
-          x: base64ToBase64Url(pendingHandshake.macEphemeralPublicKey),
-        },
-        format: "jwk",
-      }),
-      publicKey: createPublicKey({
-        key: {
-          crv: "X25519",
-          kty: "OKP",
-          x: base64ToBase64Url(pendingHandshake.phoneEphemeralPublicKey),
-        },
-        format: "jwk",
-      }),
-    });
-    const salt = createHash("sha256").update(pendingHandshake.transcriptBytes).digest();
-    const infoPrefix = [
-      HANDSHAKE_TAG,
-      pendingHandshake.sessionId,
-      currentDeviceState.macDeviceId,
-      pendingHandshake.phoneDeviceId,
-      String(pendingHandshake.keyEpoch),
-    ].join("|");
-
-    activeSession = {
-      sessionId: pendingHandshake.sessionId,
-      keyEpoch: pendingHandshake.keyEpoch,
-      phoneDeviceId: pendingHandshake.phoneDeviceId,
-      phoneIdentityPublicKey: pendingHandshake.phoneIdentityPublicKey,
-      phoneToMacKey: deriveAesKey(sharedSecret, salt, `${infoPrefix}|phoneToMac`),
-      macToPhoneKey: deriveAesKey(sharedSecret, salt, `${infoPrefix}|macToPhone`),
-      lastInboundCounter: -1,
-      nextOutboundCounter: 0,
-      isResumed: false,
-      sendWireMessage: liveSendWireMessage,
-      firstOutboundSeq: nextBridgeOutboundSeq,
-    };
-
-    nextKeyEpoch = pendingHandshake.keyEpoch + 1;
-    if (
-      pendingHandshake.handshakeMode === HANDSHAKE_MODE_QR_BOOTSTRAP
-      || getTrustedPhonePublicKey(currentDeviceState, pendingHandshake.phoneDeviceId)
-    ) {
-      // Lock the trusted phone identity so later reconnects can be verified cleanly.
-      const previousTrustedPhonePublicKey = getTrustedPhonePublicKey(
-        currentDeviceState,
-        pendingHandshake.phoneDeviceId
-      );
-      currentDeviceState = rememberTrustedPhone(
-        currentDeviceState,
-        pendingHandshake.phoneDeviceId,
-        pendingHandshake.phoneIdentityPublicKey,
-        { persist: persistTrustedPhone }
-      );
-      if (previousTrustedPhonePublicKey !== pendingHandshake.phoneIdentityPublicKey) {
-        onTrustedPhoneUpdate?.(currentDeviceState, {
-          phoneDeviceId: pendingHandshake.phoneDeviceId,
-          phoneIdentityPublicKey: pendingHandshake.phoneIdentityPublicKey,
-        });
-      }
-    }
     if (pendingHandshake.handshakeMode === HANDSHAKE_MODE_QR_BOOTSTRAP) {
+      if (!isCurrentPairing(pendingHandshake)) {
+        expirePairing(sendControlMessage);
+        return;
+      }
+      pendingHandshake.phase = "awaitingComputer";
+      pairingTimer = setTimeout(() => expirePairing(pendingHandshake?.sendControlMessage),
+        Math.max(1, pendingHandshake.expiresAtForTranscript - now()));
+      pairingTimer.unref?.();
+      publishPairingApproval();
+      return;
+    }
+    completeHandshake(sendControlMessage);
+  }
+
+  function isCurrentPairing(handshake) {
+    return handshake && currentPairingExpiresAt > now()
+      && handshake.expiresAtForTranscript === currentPairingExpiresAt
+      && handshake.pairingGeneration === pairingGeneration;
+  }
+
+  function clearPendingHandshake() {
+    clearTimeout(pairingTimer);
+    pairingTimer = null;
+    const hadApproval = pendingHandshake?.phase !== "authenticating" && pendingHandshake != null;
+    pendingHandshake = null;
+    if (hadApproval) onPairingApprovalChange?.(null);
+  }
+
+  function cancelPendingHandshake() {
+    if (pendingHandshake?.handshakeMode === HANDSHAKE_MODE_QR_BOOTSTRAP) currentPairingExpiresAt = 0;
+    clearPendingHandshake();
+    completedPairing = null;
+  }
+
+  function expirePairing(sendControlMessage) {
+    currentPairingExpiresAt = 0;
+    clearPendingHandshake();
+    sendControlMessage?.(createSecureError({ code: "pairing_expired", message: "The pairing request expired. Generate a new QR code on the computer." }));
+  }
+
+  function getPendingPairingApproval() {
+    if (!pendingHandshake || pendingHandshake.phase === "authenticating") return null;
+    if (!isCurrentPairing(pendingHandshake)) {
+      expirePairing(pendingHandshake.sendControlMessage);
+      return null;
+    }
+    return {
+      requestId: pendingHandshake.pairingRequestId,
+      fingerprint: createHash("sha256").update(pendingHandshake.transcriptBytes).digest("hex"),
+      expiresAt: pendingHandshake.expiresAtForTranscript,
+      stage: pendingHandshake.phase,
+      replacesTrustedPhone: Object.keys(currentDeviceState.trustedPhones || {}).length > 0,
+    };
+  }
+
+  function publishPairingApproval() {
+    onPairingApprovalChange?.(getPendingPairingApproval());
+  }
+
+  function decidePairingApproval({ requestId, fingerprint, decision }) {
+    const request = getPendingPairingApproval();
+    if (!request || request.requestId !== requestId || (decision === "approve" && fingerprint !== request.fingerprint)) {
+      throw new Error("The pairing request or fingerprint no longer matches. Refresh the computer pairing request.");
+    }
+    if (decision === "reject") {
+      const sender = pendingHandshake.sendControlMessage;
+      currentPairingExpiresAt = 0;
+      clearPendingHandshake();
+      sender(createSecureError({ code: "pairing_rejected", message: "Pairing was rejected on the computer. Generate a new QR code to try again." }));
+      return { requestId, stage: "rejected" };
+    }
+    if (decision !== "approve") throw new Error("Unknown pairing decision.");
+    if (!pendingHandshake.approvalNonce) pendingHandshake.approvalNonce = randomBytes(32).toString("base64");
+    pendingHandshake.phase = "awaitingPhone";
+    const approved = {
+      kind: "pairingApproved",
+      protocolVersion: SECURE_PROTOCOL_VERSION,
+      sessionId,
+      keyEpoch: pendingHandshake.keyEpoch,
+      requestId,
+      expiresAt: pendingHandshake.expiresAtForTranscript,
+      approvalNonce: pendingHandshake.approvalNonce,
+      macSignature: signTranscript(currentDeviceState.macIdentityPrivateKey, currentDeviceState.macIdentityPublicKey,
+        buildPairingControlTranscript(pendingHandshake.transcriptBytes, "pairing-approved", pendingHandshake.approvalNonce)),
+    };
+    publishPairingApproval();
+    pendingHandshake.sendControlMessage(approved);
+    return { requestId, stage: "awaitingPhone" };
+  }
+
+  function matchesPairingMessage(message, handshake, label, nonce) {
+    return message.sessionId === sessionId && message.keyEpoch === handshake.keyEpoch
+      && message.requestId === handshake.pairingRequestId && message.phoneDeviceId === handshake.phoneDeviceId
+      && message.approvalNonce === nonce
+      && verifyTranscript(handshake.phoneIdentityPublicKey,
+        buildPairingControlTranscript(handshake.transcriptBytes, label, nonce), message.phoneSignature);
+  }
+
+  function handleClientPairingConfirm(message, sendControlMessage) {
+    if (completedPairing && completedPairing.expiresAtForTranscript > now()
+      && activeSession?.keyEpoch === completedPairing.keyEpoch
+      && matchesPairingMessage(message, completedPairing, "client-pairing-confirm", completedPairing.approvalNonce)) {
+      sendControlMessage(completedPairing.ready);
+      return;
+    }
+    if (!pendingHandshake || pendingHandshake.phase !== "awaitingPhone") {
+      sendControlMessage(createSecureError({ code: "pairing_approval_required", message: "Approve this pairing on the computer first." }));
+      return;
+    }
+    if (!isCurrentPairing(pendingHandshake)) {
+      expirePairing(sendControlMessage);
+      return;
+    }
+    if (!matchesPairingMessage(message, pendingHandshake, "client-pairing-confirm", pendingHandshake.approvalNonce)) {
+      sendControlMessage(createSecureError({ code: "invalid_pairing_confirmation", message: "The phone pairing confirmation could not be verified." }));
+      return;
+    }
+    completeHandshake(sendControlMessage);
+  }
+
+  function handleClientPairingCancel(message, sendControlMessage) {
+    if (!pendingHandshake || pendingHandshake.handshakeMode !== HANDSHAKE_MODE_QR_BOOTSTRAP
+      || !matchesPairingMessage(message, pendingHandshake, "client-pairing-cancel", "")) return;
+    currentPairingExpiresAt = 0;
+    clearPendingHandshake();
+    sendControlMessage(createSecureError({ code: "pairing_cancelled", message: "Pairing was cancelled on the iPhone." }));
+  }
+
+  function completeHandshake(sendControlMessage) {
+    const handshake = pendingHandshake;
+    let nextSession;
+    let nextDeviceState;
+    let ready;
+    const previousTrustedPhonePublicKey = getTrustedPhonePublicKey(currentDeviceState, handshake.phoneDeviceId);
+    try {
+      const sharedSecret = diffieHellman({
+        privateKey: createPrivateKey({
+          key: {
+            crv: "X25519", kty: "OKP",
+            d: base64ToBase64Url(handshake.macEphemeralPrivateKey),
+            x: base64ToBase64Url(handshake.macEphemeralPublicKey),
+          },
+          format: "jwk",
+        }),
+        publicKey: createPublicKey({
+          key: { crv: "X25519", kty: "OKP", x: base64ToBase64Url(handshake.phoneEphemeralPublicKey) },
+          format: "jwk",
+        }),
+      });
+      const salt = createHash("sha256").update(handshake.transcriptBytes).digest();
+      const infoPrefix = [HANDSHAKE_TAG, handshake.sessionId, currentDeviceState.macDeviceId,
+        handshake.phoneDeviceId, String(handshake.keyEpoch)].join("|");
+      nextSession = {
+        sessionId: handshake.sessionId,
+        keyEpoch: handshake.keyEpoch,
+        phoneDeviceId: handshake.phoneDeviceId,
+        phoneIdentityPublicKey: handshake.phoneIdentityPublicKey,
+        phoneToMacKey: deriveAesKey(sharedSecret, salt, `${infoPrefix}|phoneToMac`),
+        macToPhoneKey: deriveAesKey(sharedSecret, salt, `${infoPrefix}|macToPhone`),
+        lastInboundCounter: -1,
+        nextOutboundCounter: 0,
+        isResumed: false,
+        sendWireMessage: liveSendWireMessage,
+        firstOutboundSeq: nextBridgeOutboundSeq,
+      };
+      ready = {
+        kind: "secureReady",
+        protocolVersion: SECURE_PROTOCOL_VERSION,
+        sessionId,
+        keyEpoch: handshake.keyEpoch,
+        macDeviceId: currentDeviceState.macDeviceId,
+        requestId: handshake.pairingRequestId,
+        macSignature: signTranscript(currentDeviceState.macIdentityPrivateKey, currentDeviceState.macIdentityPublicKey,
+          buildPairingControlTranscript(handshake.transcriptBytes, "secure-ready", handshake.approvalNonce)),
+      };
+      // Lock the trusted phone identity so later reconnects can be verified cleanly.
+      nextDeviceState = rememberTrustedPhoneImpl(currentDeviceState, handshake.phoneDeviceId,
+        handshake.phoneIdentityPublicKey, { persist: persistTrustedPhone });
+    } catch {
+      if (handshake.handshakeMode === HANDSHAKE_MODE_QR_BOOTSTRAP) currentPairingExpiresAt = 0;
+      clearPendingHandshake();
+      sendControlMessage(createSecureError({ code: "pairing_failed", message: "The bridge could not securely save or complete this pairing. Try a new pairing request." }));
+      return;
+    }
+
+    currentDeviceState = nextDeviceState;
+    activeSession = nextSession;
+    nextKeyEpoch = handshake.keyEpoch + 1;
+    if (handshake.handshakeMode === HANDSHAKE_MODE_QR_BOOTSTRAP) {
       resetOutboundReplayState();
       activeSession.firstOutboundSeq = nextBridgeOutboundSeq;
+      currentPairingExpiresAt = 0;
+      completedPairing = {
+        keyEpoch: handshake.keyEpoch,
+        phoneDeviceId: handshake.phoneDeviceId,
+        phoneIdentityPublicKey: handshake.phoneIdentityPublicKey,
+        transcriptBytes: handshake.transcriptBytes,
+        pairingRequestId: handshake.pairingRequestId,
+        approvalNonce: handshake.approvalNonce,
+        expiresAtForTranscript: handshake.expiresAtForTranscript,
+        ready,
+      };
+    } else {
+      completedPairing = null;
     }
-
-    const completedHandshakeMode = pendingHandshake.handshakeMode;
-    pendingHandshake = null;
-    onSecureSessionReady?.({
-      phoneDeviceId: activeSession.phoneDeviceId,
-      handshakeMode: completedHandshakeMode,
-      keyEpoch: activeSession.keyEpoch,
-    });
-    sendControlMessage({
-      kind: "secureReady",
-      sessionId,
-      keyEpoch: activeSession.keyEpoch,
-      macDeviceId: currentDeviceState.macDeviceId,
-    });
+    clearPendingHandshake();
+    // Observer failures cannot roll back a trust record already committed to disk.
+    try {
+      if (previousTrustedPhonePublicKey !== handshake.phoneIdentityPublicKey) {
+        onTrustedPhoneUpdate?.(currentDeviceState, {
+          phoneDeviceId: handshake.phoneDeviceId,
+          phoneIdentityPublicKey: handshake.phoneIdentityPublicKey,
+        });
+      }
+      onSecureSessionReady?.({ phoneDeviceId: handshake.phoneDeviceId,
+        handshakeMode: handshake.handshakeMode, keyEpoch: handshake.keyEpoch });
+    } catch {
+      debugSecureLog("secure session observer failed after trust was saved");
+    }
+    sendControlMessage(ready);
   }
 
   function handleResumeState(message) {
@@ -759,7 +933,10 @@ function createBridgeSecureTransport({
     PAIRING_QR_VERSION,
     SECURE_PROTOCOL_VERSION,
     bindLiveSendWireMessage,
+    cancelPendingHandshake,
     createPairingPayload,
+    decidePairingApproval,
+    getPendingPairingApproval,
     handleIncomingWireMessage,
     isSecureChannelReady,
     queueOutboundApplicationMessage,
@@ -877,6 +1054,7 @@ function buildTranscriptBytes({
   clientNonce,
   serverNonce,
   expiresAtForTranscript,
+  pairingRequestId = "",
 }) {
   return Buffer.concat([
     encodeLengthPrefixedUTF8(HANDSHAKE_TAG),
@@ -893,7 +1071,12 @@ function buildTranscriptBytes({
     encodeLengthPrefixedBuffer(clientNonce),
     encodeLengthPrefixedBuffer(serverNonce),
     encodeLengthPrefixedUTF8(String(expiresAtForTranscript)),
+    encodeLengthPrefixedUTF8(pairingRequestId),
   ]);
+}
+
+function buildPairingControlTranscript(transcriptBytes, label, approvalNonce = "") {
+  return Buffer.concat([transcriptBytes, encodeLengthPrefixedUTF8(label), encodeLengthPrefixedBuffer(Buffer.from(approvalNonce, "base64"))]);
 }
 
 function encodeLengthPrefixedUTF8(value) {
@@ -967,5 +1150,7 @@ module.exports = {
   PAIRING_QR_VERSION,
   SECURE_PROTOCOL_VERSION,
   createBridgeSecureTransport,
+  buildTranscriptBytes,
+  buildPairingControlTranscript,
   nonceForDirection,
 };

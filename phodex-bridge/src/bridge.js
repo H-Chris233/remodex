@@ -32,6 +32,7 @@ const {
 const { printQR } = require("./qr");
 const { rememberActiveThread } = require("./session-state");
 const { handleDesktopRequest } = require("./desktop-handler");
+const { createDesktopSidebarService } = require("./desktop-sidebar");
 const { readDaemonConfig, writeDaemonConfig } = require("./daemon-state");
 const { handleGitRequest } = require("./git-handler");
 const { handleThreadContextRequest } = require("./thread-context-handler");
@@ -55,6 +56,7 @@ const {
   resolveBridgeRelaySession,
 } = require("./secure-device-state");
 const { createBridgeSecureTransport } = require("./secure-transport");
+const { createPairingApprovalService } = require("./pairing-approval");
 const { createRolloutLiveMirrorController } = require("./rollout-live-mirror");
 const {
   buildCompleteThreadReadParams,
@@ -841,6 +843,20 @@ function startBridge({
     relayUrl: relayBaseUrl,
     deviceState,
     displayName: os.hostname(),
+    onPairingApprovalChange(request) {
+      try {
+        pairingApprovalService.publish(request);
+        if (request?.stage === "awaitingComputer" && printPairingQr) {
+          console.log(`[remodex] Compare this full fingerprint with your iPhone:\n${request.fingerprint.match(/.{8}/g).join(" ")}\n`
+            + `Approve only if every group matches: remodex approve-pairing ${request.requestId} --fingerprint ${request.fingerprint}\n`
+            + `Reject: remodex reject-pairing ${request.requestId}`);
+        }
+      } catch (error) {
+        secureTransport.cancelPendingHandshake();
+        sendRelayWireMessage(JSON.stringify({ kind: "secureError", code: "pairing_failed", message: "Local pairing approval is unavailable on the computer." }));
+        console.warn(`[remodex] Local pairing approval unavailable: ${error.message}`);
+      }
+    },
     onTrustedPhoneUpdate(nextDeviceState) {
       deviceState = nextDeviceState;
       sendRelayRegistrationUpdate(nextDeviceState);
@@ -856,6 +872,10 @@ function startBridge({
   });
   // Keeps one stable sender identity across reconnects so buffered replay state
   // reflects what actually made it onto the current relay socket.
+  const pairingApprovalService = createPairingApprovalService({
+    decide: (decision) => secureTransport.decidePairingApproval(decision),
+    onError: () => secureTransport.cancelPendingHandshake(),
+  });
   function sendRelayWireMessage(wireMessage) {
     if (socket?.readyState !== WebSocket.OPEN) {
       return false;
@@ -943,6 +963,14 @@ function startBridge({
     env: process.env,
     appPath: config.codexAppPath,
     logPrefix: "[remodex]",
+  });
+  const desktopSidebar = createDesktopSidebarService({
+    sendCodexRequest, enabled: !config.codexEndpoint, deviceId: deviceState.macDeviceId,
+    enrichThread: enrichThreadSummary,
+    listSupplementalThreads: async () => {
+      await refreshOpenCodeThreadCatalog();
+      return [...openCodeThreadCatalog.values()];
+    },
   });
   const openCodeRuntime = createOpenCodeRuntime({
     onNotification(message) {
@@ -1042,6 +1070,8 @@ function startBridge({
 
   function prepareBridgeShutdown() {
     isShuttingDown = true;
+    secureTransport.cancelPendingHandshake();
+    pairingApprovalService.dispose();
     bridgeWakeAssertion.stop();
     clearReconnectTimer();
     clearRelayWatchdog();
@@ -1198,6 +1228,7 @@ function startBridge({
 
     nextSocket.on("close", (code) => {
       if (socket === nextSocket) {
+        secureTransport.cancelPendingHandshake();
         clearRelayWatchdog();
       }
       logConnectionStatus("disconnected");
@@ -1377,6 +1408,7 @@ function startBridge({
       return;
     }
     if (handleDesktopRequest(rawMessage, sendApplicationResponse, {
+      desktopSidebar,
       bundleId: config.codexBundleId,
       appPath: config.codexAppPath,
       readBridgePreferences,
@@ -1996,9 +2028,7 @@ function startBridge({
         if (thread.runtimeProvider === "opencode") {
           return;
         }
-        threadRuntimeSettingsStore.attachToThread(thread);
-        threadListProvenanceEnricher.attachToThread(thread);
-        worktreeOriginEnricher.attachToThread(thread);
+        enrichThreadSummary(thread);
         if (trackedRequest.method !== "thread/list") {
           desktopIpcActionFollower?.observeThreadMetadata(thread);
         }
@@ -2010,6 +2040,13 @@ function startBridge({
     }
 
     return sanitizeThreadHistoryImagesForRelay(normalizedMessage, trackedRequest.method, trackedRequest);
+  }
+
+  function enrichThreadSummary(thread) {
+    if (thread.runtimeProvider === "opencode") return thread;
+    threadRuntimeSettingsStore.attachToThread(thread);
+    threadListProvenanceEnricher.attachToThread(thread);
+    return worktreeOriginEnricher.attachToThread(thread);
   }
 
   function updatePendingAuthLoginFromCodexMessage(rawMessage, parsedMessage = null) {
@@ -2050,6 +2087,7 @@ function startBridge({
     }
 
     if (method === "account/updated") {
+      desktopSidebar.invalidate();
       clearPendingAuthLogin();
     }
   }

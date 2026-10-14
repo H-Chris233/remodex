@@ -111,7 +111,7 @@ private extension CodexService {
         }
 
         switch secureConnectionState {
-        case .handshaking:
+        case .handshaking, .awaitingComputerApproval, .awaitingPhoneConfirmation:
             return "Pairing Device"
         case .liveSessionUnresolved, .reconnecting, .trustedMac:
             return "Saved Pair"

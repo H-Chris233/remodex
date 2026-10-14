@@ -11,6 +11,10 @@ import Security
 extension CodexService {
     // Completes the secure handshake before any JSON-RPC traffic is sent over the relay.
     func performSecureHandshake() async throws {
+        var ownedPairingRequestId: String?
+        defer {
+            if pairingApproval?.requestId == ownedPairingRequestId { clearPairingApprovalState() }
+        }
         guard let sessionId = normalizedRelaySessionId,
               let macDeviceId = normalizedRelayMacDeviceId else {
             throw CodexSecureTransportError.invalidHandshake(
@@ -76,6 +80,17 @@ extension CodexService {
                 "This bridge is using a different secure transport version. Update Remodex on the iPhone or paired device and try again."
             )
         }
+        guard serverHello.handshakeMode == handshakeMode else {
+            throw CodexSecureTransportError.invalidHandshake("The bridge changed the requested pairing mode.")
+        }
+        if handshakeMode == .qrBootstrap {
+            guard let requestId = serverHello.pairingRequestId,
+                  requestId.range(of: "^[a-f0-9]{32}$", options: .regularExpression) != nil,
+                  serverHello.expiresAtForTranscript > Int64(Date().timeIntervalSince1970 * 1000),
+                  serverHello.expiresAtForTranscript <= Int64(Date().addingTimeInterval(360).timeIntervalSince1970 * 1000) else {
+                throw CodexSecureTransportError.invalidHandshake("The computer pairing request is missing or expired. Generate a new QR code.")
+            }
+        }
         guard serverHello.sessionId == sessionId else {
             throw CodexSecureTransportError.invalidHandshake("The secure bridge session ID did not match the saved pairing.")
         }
@@ -100,7 +115,8 @@ extension CodexService {
             phoneEphemeralPublicKey: clientHello.phoneEphemeralPublicKey,
             clientNonce: clientNonce,
             serverNonce: serverNonce,
-            expiresAtForTranscript: serverHello.expiresAtForTranscript
+            expiresAtForTranscript: serverHello.expiresAtForTranscript,
+            pairingRequestId: serverHello.pairingRequestId ?? ""
         )
         debugSecureLog(
             "verify mode=\(serverHello.handshakeMode.rawValue) session=\(shortSecureId(sessionId)) "
@@ -154,13 +170,53 @@ extension CodexService {
             keyEpoch: serverHello.keyEpoch,
             phoneSignature: phoneSignatureData.base64EncodedString()
         )
+        if handshakeMode == .qrBootstrap {
+            ownedPairingRequestId = serverHello.pairingRequestId
+            pairingApproval = CodexPairingApprovalPresentation(
+                requestId: serverHello.pairingRequestId ?? "",
+                fingerprint: codexPairingFingerprint(transcriptBytes),
+                expiresAt: Date(timeIntervalSince1970: Double(serverHello.expiresAtForTranscript) / 1000)
+            )
+            pairingCancelMessage = SecureClientPairingDecision(
+                kind: "clientPairingCancel", sessionId: sessionId,
+                phoneDeviceId: phoneIdentityState.phoneDeviceId, keyEpoch: serverHello.keyEpoch,
+                requestId: serverHello.pairingRequestId ?? "", approvalNonce: "",
+                phoneSignature: try phonePrivateKey.signature(for: codexPairingControlTranscript(
+                    transcriptBytes, label: "client-pairing-cancel"
+                )).base64EncodedString()
+            )
+            secureConnectionState = .awaitingComputerApproval
+        }
         try await sendWireControlMessage(clientAuth)
 
-        _ = try await waitForMatchingSecureReady(
-            expectedSessionId: sessionId,
-            expectedKeyEpoch: serverHello.keyEpoch,
-            expectedMacDeviceId: macDeviceId
-        )
+        var approvalNonce = ""
+        var phoneConfirmation: SecureClientPairingDecision?
+        if handshakeMode == .qrBootstrap {
+            let approved = try await waitForPairingApproval(serverHello: serverHello, transcriptBytes: transcriptBytes)
+            approvalNonce = approved.approvalNonce
+            pairingApproval?.computerApproved = true
+            secureConnectionState = .awaitingPhoneConfirmation
+            try await waitForPhonePairingConfirmation()
+            let confirmation = SecureClientPairingDecision(
+                kind: "clientPairingConfirm", sessionId: sessionId,
+                phoneDeviceId: phoneIdentityState.phoneDeviceId, keyEpoch: serverHello.keyEpoch,
+                requestId: approved.requestId, approvalNonce: approvalNonce,
+                phoneSignature: try phonePrivateKey.signature(for: codexPairingControlTranscript(
+                    transcriptBytes, label: "client-pairing-confirm", approvalNonce: approvalNonce
+                )).base64EncodedString()
+            )
+            phoneConfirmation = confirmation
+            try await sendWireControlMessage(confirmation)
+        }
+        do {
+            _ = try await waitForMatchingSecureReady(serverHello: serverHello, transcriptBytes: transcriptBytes, approvalNonce: approvalNonce)
+        } catch CodexSecureTransportError.timedOut(_) {
+            guard let phoneConfirmation,
+                  serverHello.expiresAtForTranscript > Int64(Date().timeIntervalSince1970 * 1000) else { throw CodexSecureTransportError.timedOut("Pairing completion was not received. Generate a new QR code.") }
+            // A duplicate confirmation may recover only this handshake's signed receipt.
+            try await sendWireControlMessage(phoneConfirmation)
+            _ = try await waitForMatchingSecureReady(serverHello: serverHello, transcriptBytes: transcriptBytes, approvalNonce: approvalNonce)
+        }
 
         let macEphemeralPublicKey = try Curve25519.KeyAgreement.PublicKey(
             rawRepresentation: Data(base64EncodedOrEmpty: serverHello.macEphemeralPublicKey)
@@ -222,7 +278,7 @@ extension CodexService {
     func processIncomingWireText(_ text: String) {
         if let kind = wireMessageKind(from: text) {
             switch kind {
-            case "serverHello", "secureReady", "secureError":
+            case "serverHello", "pairingApproved", "secureReady", "secureError":
                 bufferSecureControlMessage(kind: kind, rawText: text)
                 return
             case "encryptedEnvelope":
@@ -233,7 +289,7 @@ extension CodexService {
             }
         }
 
-        processIncomingText(text)
+        // Relay plaintext is never application traffic; only authenticated envelopes reach the RPC decoder.
     }
 
     // Encrypts JSON-RPC requests/responses before they leave the iPhone.
@@ -295,6 +351,7 @@ extension CodexService {
 
     // Resets volatile secure state while preserving the trusted-device registry.
     func resetSecureTransportState(preservePendingQRBootstrapState: Bool = false) {
+        clearPairingApprovalState()
         secureSession = nil
         pendingHandshake = nil
         let continuations = pendingSecureControlContinuations
@@ -324,6 +381,39 @@ extension CodexService {
         }
 
         restoreTrustedPairPresentationState()
+    }
+
+    func confirmPairingOnPhone(requestId: String) {
+        guard let approval = pairingApproval, approval.requestId == requestId,
+              approval.computerApproved, !approval.phoneConfirmed, approval.expiresAt > Date(),
+              pairingConfirmationContinuation != nil else { return }
+        let continuation = pairingConfirmationContinuation
+        pairingConfirmationContinuation = nil
+        pairingApproval?.phoneConfirmed = true
+        pairingConfirmationTimeoutTask?.cancel()
+        pairingConfirmationTimeoutTask = nil
+        continuation?.resume()
+    }
+
+    func cancelPairingOnPhone(requestId: String) async {
+        guard pairingApproval?.requestId == requestId else { return }
+        if let cancel = pairingCancelMessage { try? await sendWireControlMessage(cancel) }
+        guard pairingApproval?.requestId == requestId else { return }
+        // Explicit cancellation must not start another automatic pairing request.
+        shouldAutoReconnectOnForeground = false
+        secureConnectionState = .rePairRequired
+        clearPairingApprovalState()
+        await disconnect()
+    }
+
+    func clearPairingApprovalState() {
+        pairingConfirmationTimeoutTask?.cancel()
+        pairingConfirmationTimeoutTask = nil
+        pairingApproval = nil
+        pairingCancelMessage = nil
+        let continuation = pairingConfirmationContinuation
+        pairingConfirmationContinuation = nil
+        continuation?.resume(throwing: CancellationError())
     }
 
     // Rebuilds the saved-pair UI state from persisted trust without touching sockets or keys.
@@ -912,6 +1002,7 @@ private extension CodexService {
     }
 
     func waitForSecureControlMessage(kind: String, timeoutSeconds: TimeInterval = 12) async throws -> String {
+        guard timeoutSeconds > 0 else { throw CodexSecureTransportError.timedOut("The secure pairing request expired.") }
         if let bufferedSecureError = bufferedSecureControlMessages["secureError"]?.first,
            let secureError = try? decodeSecureControl(SecureErrorMessage.self, from: bufferedSecureError) {
             bufferedSecureControlMessages["secureError"] = []
@@ -954,8 +1045,11 @@ private extension CodexService {
             } else if secureError.code == "pairing_expired"
                 || secureError.code == "phone_not_trusted"
                 || secureError.code == "phone_identity_changed"
-                || secureError.code == "phone_replacement_required" {
+                || secureError.code == "phone_replacement_required"
+                || ["pairing_rejected", "pairing_cancelled", "pairing_failed", "pairing_busy"].contains(secureError.code) {
                 secureConnectionState = .rePairRequired
+                shouldAutoReconnectOnForeground = false
+                clearPairingApprovalState()
             }
 
             let continuations = pendingSecureControlContinuations
@@ -1351,8 +1445,9 @@ private extension CodexService {
         phoneIdentityPublicKey: String,
         phoneEphemeralPublicKey: String
     ) async throws -> SecureServerHello {
+        let deadline = Date().addingTimeInterval(12)
         while true {
-            let raw = try await waitForSecureControlMessage(kind: "serverHello")
+            let raw = try await waitForSecureControlMessage(kind: "serverHello", timeoutSeconds: deadline.timeIntervalSinceNow)
             let hello = try decodeSecureControl(SecureServerHello.self, from: raw)
             if let echoedNonce = hello.clientNonce, echoedNonce != expectedClientNonce {
                 debugSecureLog("discarding stale serverHello (clientNonce mismatch)")
@@ -1410,7 +1505,8 @@ private extension CodexService {
             phoneEphemeralPublicKey: phoneEphemeralPublicKey,
             clientNonce: clientNonce,
             serverNonce: Data(base64EncodedOrEmpty: hello.serverNonce),
-            expiresAtForTranscript: hello.expiresAtForTranscript
+            expiresAtForTranscript: hello.expiresAtForTranscript,
+            pairingRequestId: hello.pairingRequestId ?? ""
         )
         return macPublicKey.isValidSignature(
             Data(base64EncodedOrEmpty: hello.macSignature),
@@ -1421,20 +1517,45 @@ private extension CodexService {
     /// Waits for a secureReady whose keyEpoch matches the current handshake.
     /// Stale secureReady messages from previous sessions are discarded until the
     /// correct one arrives or the per-message 12-second timeout fires.
-    func waitForMatchingSecureReady(
-        expectedSessionId: String,
-        expectedKeyEpoch: Int,
-        expectedMacDeviceId: String
-    ) async throws -> SecureReadyMessage {
+    func waitForMatchingSecureReady(serverHello: SecureServerHello, transcriptBytes: Data, approvalNonce: String) async throws -> SecureReadyMessage {
+        let deadline = Date().addingTimeInterval(12)
         while true {
-            let raw = try await waitForSecureControlMessage(kind: "secureReady")
+            let raw = try await waitForSecureControlMessage(kind: "secureReady", timeoutSeconds: deadline.timeIntervalSinceNow)
             let ready = try decodeSecureControl(SecureReadyMessage.self, from: raw)
-            if ready.sessionId == expectedSessionId,
-               ready.keyEpoch == expectedKeyEpoch,
-               ready.macDeviceId == expectedMacDeviceId {
-                return ready
+            guard ready.sessionId == serverHello.sessionId, ready.keyEpoch == serverHello.keyEpoch else { continue }
+            guard ready.isValid(for: serverHello, transcriptBytes: transcriptBytes, approvalNonce: approvalNonce) else {
+                throw CodexSecureTransportError.invalidHandshake("The computer's pairing completion could not be verified.")
             }
-            debugSecureLog("discarding stale secureReady (keyEpoch=\(ready.keyEpoch) expected=\(expectedKeyEpoch))")
+            return ready
+        }
+    }
+
+    func waitForPairingApproval(serverHello: SecureServerHello, transcriptBytes: Data) async throws -> SecurePairingApproved {
+        let deadline = min(Date().addingTimeInterval(300), Date(timeIntervalSince1970: Double(serverHello.expiresAtForTranscript) / 1000))
+        while true {
+            let raw = try await waitForSecureControlMessage(kind: "pairingApproved", timeoutSeconds: deadline.timeIntervalSinceNow)
+            let approved = try decodeSecureControl(SecurePairingApproved.self, from: raw)
+            guard approved.sessionId == serverHello.sessionId, approved.keyEpoch == serverHello.keyEpoch else { continue }
+            guard approved.isValid(for: serverHello, transcriptBytes: transcriptBytes), deadline > Date() else {
+                throw CodexSecureTransportError.invalidHandshake("The computer's pairing approval could not be verified.")
+            }
+            return approved
+        }
+    }
+
+    func waitForPhonePairingConfirmation() async throws {
+        guard let approval = pairingApproval, approval.expiresAt > Date() else {
+            throw CodexSecureTransportError.timedOut("The pairing request expired. Generate a new QR code.")
+        }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            pairingConfirmationContinuation = continuation
+            pairingConfirmationTimeoutTask = Task { @MainActor [weak self] in
+                do { try await Task.sleep(for: .seconds(max(0, approval.expiresAt.timeIntervalSinceNow))) } catch { return }
+                guard let self, self.pairingApproval?.requestId == approval.requestId else { return }
+                let waiter = self.pairingConfirmationContinuation
+                self.pairingConfirmationContinuation = nil
+                waiter?.resume(throwing: CodexSecureTransportError.timedOut("The pairing request expired. Generate a new QR code."))
+            }
         }
     }
 

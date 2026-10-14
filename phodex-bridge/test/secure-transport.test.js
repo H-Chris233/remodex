@@ -16,6 +16,7 @@ const {
   generateKeyPairSync,
   hkdfSync,
   sign,
+  verify,
 } = require("crypto");
 const {
   HANDSHAKE_MODE_QR_BOOTSTRAP,
@@ -23,6 +24,7 @@ const {
   SECURE_PROTOCOL_VERSION,
   createBridgeSecureTransport,
   nonceForDirection,
+  buildPairingControlTranscript,
 } = require("../src/secure-transport");
 
 // Keeps unit handshakes from mutating the real Mac pairing trust store.
@@ -261,7 +263,7 @@ test("secure transport round-trips encrypted payloads after a trusted reconnect 
   ]);
 });
 
-test("qr bootstrap allows a fresh QR scan to replace the trusted iPhone", () => {
+test("qr bootstrap replaces the trusted iPhone only after both local confirmations", () => {
   const macIdentity = createOkpKeyPair("ed25519");
   const firstPhoneIdentity = createOkpKeyPair("ed25519");
   const firstPhoneEphemeral = createOkpKeyPair("x25519");
@@ -885,10 +887,13 @@ function finishHandshake({
   handshakeMode,
   lastAppliedBridgeOutboundSeq,
   skipResumeState = false,
+  pauseBeforeApproval = false,
+  pauseBeforeAuth = false,
 }) {
   const controlMessages = [];
   const applicationMessages = [];
   const clientNonce = Buffer.alloc(32, 7);
+  if (handshakeMode === HANDSHAKE_MODE_QR_BOOTSTRAP) secureTransport.createPairingPayload();
 
   secureTransport.handleIncomingWireMessage(
     JSON.stringify({
@@ -928,6 +933,7 @@ function finishHandshake({
     clientNonce,
     serverNonce: Buffer.from(serverHello.serverNonce, "base64"),
     expiresAtForTranscript: serverHello.expiresAtForTranscript,
+    pairingRequestId: serverHello.pairingRequestId,
   });
   const phoneAuthTranscript = Buffer.concat([
     transcriptBytes,
@@ -947,6 +953,9 @@ function finishHandshake({
     })
   );
 
+  const clientAuth = { kind: "clientAuth", sessionId, phoneDeviceId, keyEpoch: serverHello.keyEpoch, phoneSignature: phoneSignature.toString("base64") };
+  if (pauseBeforeAuth) return { applicationMessages, controlMessages, serverHello, transcriptBytes, clientAuth };
+
   secureTransport.handleIncomingWireMessage(
     JSON.stringify({
       kind: "clientAuth",
@@ -965,8 +974,28 @@ function finishHandshake({
     }
   );
 
+  let approvalNonce = "";
+  if (handshakeMode === HANDSHAKE_MODE_QR_BOOTSTRAP) {
+    assert.equal(controlMessages.some((message) => message.kind === "secureReady"), false);
+    const request = secureTransport.getPendingPairingApproval();
+    assert.ok(request);
+    assert.equal(request.fingerprint, createHash("sha256").update(transcriptBytes).digest("hex"));
+    if (pauseBeforeApproval) return { applicationMessages, controlMessages, serverHello, transcriptBytes, request };
+    secureTransport.decidePairingApproval({ ...request, decision: "approve" });
+    const approved = controlMessages.find((message) => message.kind === "pairingApproved");
+    approvalNonce = approved.approvalNonce;
+    assert.equal(controlMessages.some((message) => message.kind === "secureReady"), false);
+    secureTransport.handleIncomingWireMessage(JSON.stringify({
+      kind: "clientPairingConfirm", sessionId, phoneDeviceId, keyEpoch: serverHello.keyEpoch,
+      requestId: request.requestId, approvalNonce,
+      phoneSignature: signIdentity(phoneIdentity, buildPairingControlTranscript(transcriptBytes, "client-pairing-confirm", approvalNonce)),
+    }), { sendControlMessage: (message) => controlMessages.push(message), onApplicationMessage: (message) => applicationMessages.push(message) });
+  }
   const secureReady = controlMessages.find((message) => message.kind === "secureReady");
   assert.ok(secureReady, "expected secureReady");
+  assert.equal(verify(null, buildPairingControlTranscript(transcriptBytes, "secure-ready", approvalNonce),
+    createPublicKey({ key: { crv: "Ed25519", kty: "OKP", x: base64ToBase64Url(macIdentity.publicKey) }, format: "jwk" }),
+    Buffer.from(secureReady.macSignature, "base64")), true);
 
   if (!skipResumeState) {
     secureTransport.handleIncomingWireMessage(
@@ -1015,6 +1044,7 @@ function buildTranscriptBytes({
   clientNonce,
   serverNonce,
   expiresAtForTranscript,
+  pairingRequestId = "",
 }) {
   return Buffer.concat([
     encodeLengthPrefixedUTF8("remodex-e2ee-v1"),
@@ -1031,6 +1061,7 @@ function buildTranscriptBytes({
     encodeLengthPrefixedBuffer(clientNonce),
     encodeLengthPrefixedBuffer(serverNonce),
     encodeLengthPrefixedUTF8(String(expiresAtForTranscript)),
+    encodeLengthPrefixedUTF8(pairingRequestId),
   ]);
 }
 
@@ -1116,3 +1147,204 @@ function base64UrlToBase64(value) {
 function base64ToBase64Url(value) {
   return value.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
+
+function signIdentity(identity, bytes) {
+  return sign(null, bytes, createPrivateKey({
+    key: { crv: "Ed25519", kty: "OKP", d: base64ToBase64Url(identity.privateKey), x: base64ToBase64Url(identity.publicKey) }, format: "jwk",
+  })).toString("base64");
+}
+
+function pendingPairing(options = {}) {
+  const macIdentity = createOkpKeyPair("ed25519");
+  const phoneIdentity = createOkpKeyPair("ed25519");
+  const phoneEphemeral = createOkpKeyPair("x25519");
+  const updates = [];
+  const secureTransport = createTestBridgeSecureTransport({
+    sessionId: "approval-session", relayUrl: "ws://127.0.0.1/relay",
+    deviceState: { macDeviceId: "approval-mac", macIdentityPrivateKey: macIdentity.privateKey, macIdentityPublicKey: macIdentity.publicKey, trustedPhones: {} },
+    onTrustedPhoneUpdate: (state) => updates.push(state), ...options,
+  });
+  const exchange = finishHandshake({ secureTransport, macIdentity, phoneIdentity, phoneEphemeral,
+    sessionId: "approval-session", macDeviceId: "approval-mac", phoneDeviceId: "approval-phone",
+    handshakeMode: HANDSHAKE_MODE_QR_BOOTSTRAP, pauseBeforeApproval: true, pauseBeforeAuth: options.pauseBeforeAuth === true });
+  const send = (message) => secureTransport.handleIncomingWireMessage(JSON.stringify(message), {
+    sendControlMessage: (response) => exchange.controlMessages.push(response),
+    onApplicationMessage: (payload) => exchange.applicationMessages.push(payload),
+  });
+  const confirm = (nonce, overrides = {}) => ({
+    kind: "clientPairingConfirm", sessionId: "approval-session", phoneDeviceId: "approval-phone",
+    keyEpoch: exchange.serverHello.keyEpoch, requestId: exchange.request.requestId, approvalNonce: nonce,
+    phoneSignature: signIdentity(phoneIdentity, buildPairingControlTranscript(exchange.transcriptBytes, "client-pairing-confirm", nonce)), ...overrides,
+  });
+  const approve = () => {
+    secureTransport.decidePairingApproval({ ...exchange.request, decision: "approve" });
+    return exchange.controlMessages.findLast((message) => message.kind === "pairingApproved").approvalNonce;
+  };
+  return { ...exchange, secureTransport, updates, phoneIdentity, phoneEphemeral, macIdentity, send, confirm, approve };
+}
+
+test("relay-selected keys cannot gain a session or invoke RPC before both approvals", () => {
+  const h = pendingPairing();
+  h.send(h.confirm(Buffer.alloc(32, 1).toString("base64")));
+  h.send({ kind: "resumeState", sessionId: "approval-session", keyEpoch: h.serverHello.keyEpoch });
+  h.send({ kind: "encryptedEnvelope", sessionId: "approval-session", keyEpoch: h.serverHello.keyEpoch });
+  assert.equal(h.secureTransport.isSecureChannelReady(), false);
+  assert.deepEqual(h.updates, []);
+  assert.deepEqual(h.applicationMessages, []);
+  const nonce = h.approve();
+  h.send({ kind: "encryptedEnvelope", sessionId: "approval-session", keyEpoch: h.serverHello.keyEpoch });
+  assert.equal(h.controlMessages.at(-1).code, "secure_channel_unavailable");
+  assert.deepEqual(h.updates, []);
+  h.send(h.confirm(nonce));
+  assert.equal(h.controlMessages.at(-1).kind, "secureReady");
+  assert.equal(h.updates.length, 1);
+  h.secureTransport.cancelPendingHandshake();
+});
+
+test("fingerprint, nonce, signature and request mismatches cannot finalize pairing", () => {
+  const h = pendingPairing();
+  assert.throws(() => h.secureTransport.decidePairingApproval({ ...h.request, decision: "approve", fingerprint: "0".repeat(64) }), /fingerprint/);
+  const nonce = h.approve();
+  const invalid = [h.confirm(Buffer.alloc(32, 2).toString("base64")), h.confirm(nonce, { requestId: "0".repeat(32) }),
+    h.confirm(nonce, { sessionId: "other-session" }), h.confirm(nonce, { phoneSignature: Buffer.alloc(64).toString("base64") })];
+  for (const message of invalid) {
+    h.send(message);
+    assert.equal(h.controlMessages.at(-1).code, "invalid_pairing_confirmation");
+    assert.equal(h.updates.length, 0);
+  }
+  h.secureTransport.cancelPendingHandshake();
+});
+
+test("late confirmations and old local decisions fail after expiry, rejection, rotation or disconnect", () => {
+  for (const reason of ["expiry", "reject", "rotate", "disconnect"]) {
+    let clock = Date.now();
+    const h = pendingPairing({ now: () => clock });
+    const nonce = h.approve();
+    if (reason === "expiry") clock = h.request.expiresAt;
+    if (reason === "reject") h.secureTransport.decidePairingApproval({ requestId: h.request.requestId, decision: "reject" });
+    if (reason === "rotate") h.secureTransport.createPairingPayload();
+    if (reason === "disconnect") h.secureTransport.cancelPendingHandshake();
+    h.send(h.confirm(nonce));
+    assert.equal(h.updates.length, 0, reason);
+    assert.notEqual(h.controlMessages.at(-1).kind, "secureReady", reason);
+    assert.throws(() => h.secureTransport.decidePairingApproval({ ...h.request, decision: "approve" }), /no longer matches/);
+    h.secureTransport.cancelPendingHandshake();
+  }
+});
+
+test("concurrent hello cannot replace the fingerprint being approved", () => {
+  const h = pendingPairing();
+  h.send({ kind: "clientHello", protocolVersion: 3, sessionId: "approval-session", handshakeMode: "qr_bootstrap",
+    phoneDeviceId: "another-phone", phoneIdentityPublicKey: h.phoneIdentity.publicKey,
+    phoneEphemeralPublicKey: h.phoneEphemeral.publicKey, clientNonce: Buffer.alloc(32, 9).toString("base64") });
+  assert.equal(h.controlMessages.at(-1).code, "pairing_busy");
+  assert.deepEqual(h.secureTransport.getPendingPairingApproval(), h.request);
+  h.secureTransport.cancelPendingHandshake();
+});
+
+test("duplicate confirmations return the same receipt without installing or persisting twice", () => {
+  const h = pendingPairing();
+  const wire = [];
+  h.secureTransport.bindLiveSendWireMessage((message) => wire.push(JSON.parse(message)));
+  const nonce = h.approve();
+  assert.equal(h.approve(), nonce);
+  const message = h.confirm(nonce);
+  h.send(message);
+  const ready = h.controlMessages.at(-1);
+  h.send({ kind: "resumeState", sessionId: "approval-session", keyEpoch: ready.keyEpoch, bridgeReplayEpoch: h.serverHello.bridgeReplayEpoch, lastAppliedBridgeOutboundSeq: 0 });
+  h.secureTransport.queueOutboundApplicationMessage('{"id":1,"result":"first"}');
+  h.send(message);
+  assert.deepEqual(h.controlMessages.at(-1), ready);
+  h.secureTransport.queueOutboundApplicationMessage('{"id":2,"result":"second"}');
+  assert.deepEqual(wire.map((envelope) => envelope.counter), [0, 1]);
+  assert.equal(h.updates.length, 1);
+  assert.equal(h.secureTransport.getPendingPairingApproval(), null);
+  h.secureTransport.cancelPendingHandshake();
+});
+
+test("a failed trust write never installs the proposed session", () => {
+  const h = pendingPairing({ rememberTrustedPhoneImpl: () => { throw new Error("disk full"); } });
+  h.send(h.confirm(h.approve()));
+  assert.equal(h.controlMessages.at(-1).code, "pairing_failed");
+  h.send({ kind: "encryptedEnvelope" });
+  assert.equal(h.controlMessages.at(-1).code, "secure_channel_unavailable");
+  assert.equal(h.updates.length, 0);
+});
+
+test("signed phone cancellation closes the window and cannot be confused with confirmation", () => {
+  const h = pendingPairing();
+  h.send({ ...h.confirm(""), kind: "clientPairingCancel" });
+  assert.ok(h.secureTransport.getPendingPairingApproval());
+  h.send({ ...h.confirm(""), kind: "clientPairingCancel", phoneSignature: signIdentity(h.phoneIdentity,
+    buildPairingControlTranscript(h.transcriptBytes, "client-pairing-cancel")) });
+  assert.equal(h.controlMessages.at(-1).code, "pairing_cancelled");
+  assert.equal(h.secureTransport.getPendingPairingApproval(), null);
+  assert.equal(h.updates.length, 0);
+});
+
+test("v3 transcript, full fingerprint and signatures match the cross-platform fixture", () => {
+  const vector = require("./fixtures/pairing-v3.json");
+  const { buildTranscriptBytes: bridgeTranscript } = require("../src/secure-transport");
+  const input = { ...vector.input, clientNonce: Buffer.from(vector.input.clientNonce, "base64"), serverNonce: Buffer.from(vector.input.serverNonce, "base64") };
+  const transcript = bridgeTranscript(input);
+  assert.equal(transcript.toString("base64"), vector.transcriptBase64);
+  assert.equal(createHash("sha256").update(transcript).digest("hex"), vector.fingerprint);
+  const mac = { publicKey: vector.input.macIdentityPublicKey, privateKey: vector.macPrivateSeed };
+  const phone = { publicKey: vector.input.phoneIdentityPublicKey, privateKey: vector.phonePrivateSeed };
+  assert.equal(signIdentity(mac, transcript), vector.macHandshake);
+  assert.equal(signIdentity(phone, Buffer.concat([transcript, encodeLengthPrefixedUTF8("client-auth")])), vector.phoneAuth);
+  for (const [label, owner, expected, nonce] of [
+    ["pairing-approved", mac, vector.macApproval, vector.approvalNonce],
+    ["client-pairing-confirm", phone, vector.phoneConfirm, vector.approvalNonce],
+    ["client-pairing-cancel", phone, vector.phoneCancel, ""],
+    ["secure-ready", mac, vector.macReady, vector.approvalNonce],
+  ]) assert.equal(signIdentity(owner, buildPairingControlTranscript(transcript, label, nonce)), expected);
+});
+
+test("v2 and bootstrap without an issued local pairing window are rejected", () => {
+  const macIdentity = createOkpKeyPair("ed25519");
+  const phoneIdentity = createOkpKeyPair("ed25519");
+  const transport = createTestBridgeSecureTransport({ sessionId: "closed", relayUrl: "ws://127.0.0.1/relay",
+    deviceState: { macDeviceId: "closed-mac", macIdentityPrivateKey: macIdentity.privateKey, macIdentityPublicKey: macIdentity.publicKey, trustedPhones: {} } });
+  const responses = [];
+  const hello = { kind: "clientHello", sessionId: "closed", handshakeMode: "qr_bootstrap", phoneDeviceId: "new-phone",
+    phoneIdentityPublicKey: phoneIdentity.publicKey, phoneEphemeralPublicKey: createOkpKeyPair("x25519").publicKey, clientNonce: Buffer.alloc(32, 1).toString("base64") };
+  for (const [protocolVersion, code] of [[2, "update_required"], [3, "pairing_expired"]]) {
+    transport.handleIncomingWireMessage(JSON.stringify({ ...hello, protocolVersion }), { sendControlMessage: (message) => responses.push(message), onApplicationMessage: () => assert.fail("Unexpected RPC") });
+    assert.equal(responses.at(-1).code, code);
+  }
+});
+
+test("clientAuth cannot extend a pairing window that expired after serverHello", () => {
+  let clock = Date.now();
+  const h = pendingPairing({ now: () => clock, pauseBeforeAuth: true });
+  clock = h.serverHello.expiresAtForTranscript;
+  h.send(h.clientAuth);
+  assert.equal(h.controlMessages.at(-1).code, "pairing_expired");
+  assert.equal(h.secureTransport.getPendingPairingApproval(), null);
+  assert.equal(h.updates.length, 0);
+});
+
+test("pending and rejected replacements preserve the already trusted active phone", () => {
+  const macIdentity = createOkpKeyPair("ed25519");
+  const firstPhone = createOkpKeyPair("ed25519");
+  const secondPhone = createOkpKeyPair("ed25519");
+  const updates = [];
+  const secureTransport = createTestBridgeSecureTransport({ sessionId: "retain-session", relayUrl: "ws://127.0.0.1/relay",
+    deviceState: { macDeviceId: "retain-mac", macIdentityPrivateKey: macIdentity.privateKey, macIdentityPublicKey: macIdentity.publicKey, trustedPhones: {} },
+    onTrustedPhoneUpdate: (state) => updates.push(state),
+  });
+  const first = { secureTransport, sessionId: "retain-session", macDeviceId: "retain-mac", phoneDeviceId: "first-phone",
+    macIdentity, phoneIdentity: firstPhone, phoneEphemeral: createOkpKeyPair("x25519"), handshakeMode: HANDSHAKE_MODE_QR_BOOTSTRAP, lastAppliedBridgeOutboundSeq: 0 };
+  finishHandshake(first);
+  const second = finishHandshake({ ...first, phoneDeviceId: "second-phone", phoneIdentity: secondPhone,
+    phoneEphemeral: createOkpKeyPair("x25519"), pauseBeforeApproval: true });
+  assert.equal(secureTransport.isSecureChannelReady(), true);
+  secureTransport.decidePairingApproval({ requestId: second.request.requestId, decision: "reject" });
+  assert.equal(secureTransport.isSecureChannelReady(), true);
+  assert.equal(updates.length, 1);
+  assert.deepEqual(updates[0].trustedPhones, { "first-phone": firstPhone.publicKey });
+  finishHandshake({ ...first, handshakeMode: HANDSHAKE_MODE_TRUSTED_RECONNECT, phoneEphemeral: createOkpKeyPair("x25519") });
+  assert.equal(secureTransport.isSecureChannelReady(), true);
+  assert.equal(secureTransport.getPendingPairingApproval(), null);
+});

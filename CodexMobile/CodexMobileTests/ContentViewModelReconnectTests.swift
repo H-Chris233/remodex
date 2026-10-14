@@ -13,6 +13,22 @@ import XCTest
 final class ContentViewModelReconnectTests: XCTestCase {
     private static var retainedServices: [CodexService] = []
 
+    func testManualScanCancelsUnconfirmedPairingWithoutDeletingTrustedComputers() async {
+        let service = makeService()
+        let viewModel = ContentViewModel()
+        service.trustedMacRegistry.records["saved-mac"] = CodexTrustedMacRecord(
+            macDeviceId: "saved-mac", macIdentityPublicKey: Data(repeating: 1, count: 32).base64EncodedString(), lastPairedAt: Date()
+        )
+        service.isConnected = true
+        service.pairingApproval = CodexPairingApprovalPresentation(requestId: "pending", fingerprint: String(repeating: "a", count: 64), expiresAt: Date().addingTimeInterval(60))
+        service.secureConnectionState = .awaitingComputerApproval
+        await viewModel.stopAutoReconnectForManualScan(codex: service)
+        XCTAssertNil(service.pairingApproval)
+        XCTAssertNil(service.pairingConfirmationContinuation)
+        XCTAssertNotNil(service.trustedMacRegistry.records["saved-mac"])
+        XCTAssertFalse(service.shouldAutoReconnectOnForeground)
+    }
+
     override func setUp() {
         super.setUp()
         clearStoredSecureRelayState()

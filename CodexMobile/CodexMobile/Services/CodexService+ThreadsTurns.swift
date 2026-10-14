@@ -124,6 +124,7 @@ extension CodexService {
     // Preserves the older startThread symbol used by most call sites and incremental builds.
     func startThread(
         preferredProjectPath: String? = nil,
+        preferredProjectId: String? = nil,
         runtimeOverride: CodexThreadRuntimeOverride? = nil,
         runtimeProvider: CodexRuntimeProvider = .codex,
         openCodeModelID: String? = nil,
@@ -131,6 +132,7 @@ extension CodexService {
     ) async throws -> CodexThread {
         try await startThreadImpl(
             preferredProjectPath: preferredProjectPath,
+            preferredProjectId: preferredProjectId,
             pendingComposerAction: nil,
             runtimeOverride: runtimeOverride,
             runtimeProvider: runtimeProvider,
@@ -142,6 +144,7 @@ extension CodexService {
     // Starts a new thread and seeds a one-shot composer action for the destination thread.
     func startThread(
         preferredProjectPath: String? = nil,
+        preferredProjectId: String? = nil,
         pendingComposerAction: CodexPendingThreadComposerAction,
         runtimeOverride: CodexThreadRuntimeOverride? = nil,
         runtimeProvider: CodexRuntimeProvider = .codex,
@@ -150,6 +153,7 @@ extension CodexService {
     ) async throws -> CodexThread {
         try await startThreadImpl(
             preferredProjectPath: preferredProjectPath,
+            preferredProjectId: preferredProjectId,
             pendingComposerAction: pendingComposerAction,
             runtimeOverride: runtimeOverride,
             runtimeProvider: runtimeProvider,
@@ -161,6 +165,7 @@ extension CodexService {
     // Starts a new thread and stores it in local state.
     private func startThreadImpl(
         preferredProjectPath: String? = nil,
+        preferredProjectId: String? = nil,
         pendingComposerAction: CodexPendingThreadComposerAction? = nil,
         runtimeOverride: CodexThreadRuntimeOverride? = nil,
         runtimeProvider: CodexRuntimeProvider = .codex,
@@ -199,13 +204,18 @@ extension CodexService {
             return model?.supportsServiceTier(requestedTier) == false ? "default" : requestedTier.rawValue
         }()
         var includesServiceTier = explicitServiceTier != nil
+        var includesProjectId = runtimeProvider == .codex && preferredProjectId != nil
+        if includesProjectId, desktopSidebarSnapshot?.projects.contains(where: { $0.projectId == preferredProjectId }) != true {
+            throw CodexServiceError.invalidInput("The selected desktop project is no longer available. Select it again.")
+        }
         let accessConfiguration = runtimeAccessConfiguration()
 
         while true {
             var params = CodexThreadStartProjectBinding.makeThreadStartParams(
                 modelIdentifier: runtimeProvider == .opencode ? openCodeModelID : explicitModelIdentifier,
                 preferredProjectPath: normalizedPreferredProjectPath,
-                serviceTier: runtimeProvider == .codex && includesServiceTier ? explicitServiceTier : nil
+                serviceTier: runtimeProvider == .codex && includesServiceTier ? explicitServiceTier : nil,
+                projectId: includesProjectId ? preferredProjectId : nil
             )
             if runtimeProvider == .opencode {
                 params["runtimeProvider"] = .string(CodexRuntimeProvider.opencode.rawValue)
@@ -273,6 +283,13 @@ extension CodexService {
                 return thread
             } catch {
                 if runtimeProvider == .opencode { throw error }
+                if includesProjectId, case CodexServiceError.rpcError(let rpcError) = error,
+                   [-32600, -32602].contains(rpcError.code),
+                   rpcError.message.lowercased().contains("projectid"),
+                   rpcError.message.lowercased().contains("unknown field") {
+                    includesProjectId = false
+                    continue
+                }
                 guard consumeUnsupportedServiceTier(error, includesServiceTier: &includesServiceTier) else {
                     throw error
                 }
@@ -1170,7 +1187,8 @@ enum CodexThreadStartProjectBinding {
     static func makeThreadStartParams(
         modelIdentifier: String?,
         preferredProjectPath: String?,
-        serviceTier: String?
+        serviceTier: String?,
+        projectId: String? = nil
     ) -> RPCObject {
         var params: RPCObject = [:]
 
@@ -1181,6 +1199,7 @@ enum CodexThreadStartProjectBinding {
         if let preferredProjectPath {
             params["cwd"] = .string(preferredProjectPath)
         }
+        if let projectId { params["projectId"] = .string(projectId) }
 
         if let serviceTier {
             params["serviceTier"] = .string(serviceTier)

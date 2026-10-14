@@ -235,11 +235,18 @@ function writeCanonicalFileStateString(serialized) {
   const storeDir = resolveStoreDir();
   const storeFile = resolveStoreFile();
   fs.mkdirSync(storeDir, { recursive: true });
-  fs.writeFileSync(storeFile, serialized, { mode: 0o600 });
+  const temporaryFile = `${storeFile}.${randomUUID()}.tmp`;
   try {
-    fs.chmodSync(storeFile, 0o600);
-  } catch {
-    // Best-effort only on filesystems that support POSIX modes.
+    fs.writeFileSync(temporaryFile, serialized, { mode: 0o600, flag: "wx" });
+    try {
+      fs.chmodSync(temporaryFile, 0o600);
+    } catch {
+      // Best-effort only on filesystems that support POSIX modes.
+    }
+    // A failed replacement must leave the previously trusted phone intact.
+    fs.renameSync(temporaryFile, storeFile);
+  } finally {
+    fs.rmSync(temporaryFile, { force: true });
   }
 }
 

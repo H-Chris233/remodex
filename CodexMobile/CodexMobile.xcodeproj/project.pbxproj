@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A1385041C02745E5B96B0203 /* CodexDesktopSidebarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1385041C02745E5B96B0204 /* CodexDesktopSidebarTests.swift */; };
+        A1385041C02745E5B96B0201 /* pairing-v3.json in Resources */ = {isa = PBXBuildFile; fileRef = A1385041C02745E5B96B0202 /* pairing-v3.json */; };
 		EAC174A118B04EDC99C18401 /* AssistantMemoryCitationParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EAC174A118B04EDC99C18402 /* AssistantMemoryCitationParserTests.swift */; };
 		11A2B3C4D5E6F708192A3B4C /* TurnFileAutocompleteTokenTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11A2B3C4D5E6F708192A3B4D /* TurnFileAutocompleteTokenTests.swift */; };
 		1BF7B512D49503A3C3290F00 /* BridgeMenuBarStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A1FC345ADD350213550F36C /* BridgeMenuBarStore.swift */; };
@@ -138,6 +140,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		A1385041C02745E5B96B0204 /* CodexDesktopSidebarTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexDesktopSidebarTests.swift; sourceTree = "<group>"; };
+        A1385041C02745E5B96B0202 /* pairing-v3.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = "pairing-v3.json"; path = "../phodex-bridge/test/fixtures/pairing-v3.json"; sourceTree = SOURCE_ROOT; };
 		EAC174A118B04EDC99C18402 /* AssistantMemoryCitationParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssistantMemoryCitationParserTests.swift; sourceTree = "<group>"; };
 		02C96CD0916A43F38184398D /* AssistantTurnEndActionVisibilityTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AssistantTurnEndActionVisibilityTests.swift; sourceTree = "<group>"; };
 		11A2B3C4D5E6F708192A3B4D /* TurnFileAutocompleteTokenTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TurnFileAutocompleteTokenTests.swift; sourceTree = "<group>"; };
@@ -300,6 +304,8 @@
 		208D6F189D9F04FCC137EE5A /* CodexMobileTests */ = {
 			isa = PBXGroup;
 			children = (
+				A1385041C02745E5B96B0204 /* CodexDesktopSidebarTests.swift */,
+                A1385041C02745E5B96B0202 /* pairing-v3.json */,
 				02C96CD0916A43F38184398D /* AssistantTurnEndActionVisibilityTests.swift */,
 				22B3C4D5E6F708192A3B4C5E /* CodexFuzzyFileSearchDecodeTests.swift */,
 				C1D2E3F40516273849A5B6C7 /* CodexServiceIncomingCommandExecutionTests.swift */,
@@ -651,6 +657,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+                A1385041C02745E5B96B0201 /* pairing-v3.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -714,6 +721,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1385041C02745E5B96B0203 /* CodexDesktopSidebarTests.swift in Sources */,
 				7EFA3E8309EF41CA902C7A67 /* AssistantTurnEndActionVisibilityTests.swift in Sources */,
 				22B3C4D5E6F708192A3B4C5D /* CodexFuzzyFileSearchDecodeTests.swift in Sources */,
 				B1C2D3E4F5061728394A5B6C /* CodexServiceIncomingCommandExecutionTests.swift in Sources */,
