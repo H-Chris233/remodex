@@ -936,6 +936,16 @@ extension CodexService {
         runningThreadIDs: Set<String>,
         allowsAsyncUserInput: Bool = true
     ) throws -> [CodexMessage] {
+        let voiceRows = existing.filter { $0.id.hasPrefix("realtime:") }
+        if !voiceRows.isEmpty, !history.contains(where: { $0.id.hasPrefix("realtime:") }) {
+            // Ordinary turn pages cannot confirm, deduplicate, or delete turn-less voice items.
+            var merged = try mergeHistoryMessages(existing.filter { !$0.id.hasPrefix("realtime:") }, history,
+                activeThreadIDs: activeThreadIDs, activeTurnIDs: activeTurnIDs,
+                runningThreadIDs: runningThreadIDs, allowsAsyncUserInput: allowsAsyncUserInput)
+            merged.append(contentsOf: voiceRows)
+            merged.sort { $0.orderIndex < $1.orderIndex }
+            return merged
+        }
         if existing.isEmpty {
             // History messages arrive in server order; assign sequential orderIndex values
             // so that the stable sort preserves server-provided chronology.

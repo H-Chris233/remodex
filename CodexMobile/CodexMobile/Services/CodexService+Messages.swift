@@ -1705,6 +1705,7 @@ extension CodexService {
                 }
             }
             refreshThreadTimelineState(for: threadId)
+            syncRealtimeTimeline(threadID: threadId)
             return outcome
         }
 

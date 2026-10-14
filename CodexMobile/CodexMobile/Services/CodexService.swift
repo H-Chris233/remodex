@@ -433,6 +433,11 @@ final class CodexService {
             scheduleCurrentMacThreadListSnapshotPersistence()
         }
     }
+    var realtimeVoice = CodexRealtimeVoiceCoordinator()
+    @ObservationIgnored var realtimeTranscriptByThread: [String: [String: CodexVoiceTranscript]] = [:]
+    @ObservationIgnored var realtimeTimelineTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored var realtimeTimelineSyncedAt: [String: Date] = [:]
+    @ObservationIgnored var supportsRealtimeTimeline = true
     var isConnected = false
     var isConnecting = false
     var isInitialized = false

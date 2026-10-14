@@ -10,6 +10,7 @@ import UIKit
 private enum RootSheetRoute: Identifiable, Equatable {
     case bridgeUpdate(CodexBridgeUpdatePrompt)
     case whatsNew(version: String)
+    case voiceCall
 
     var id: String {
         switch self {
@@ -17,6 +18,8 @@ private enum RootSheetRoute: Identifiable, Equatable {
             return "bridge-update-\(prompt.id.uuidString)"
         case .whatsNew(let version):
             return "whats-new-\(version)"
+        case .voiceCall:
+            return "voice-call"
         }
     }
 }
@@ -285,6 +288,13 @@ struct ContentView: View {
                     bridgeUpdateSheet(prompt: prompt)
                 case .whatsNew(let version):
                     whatsNewSheet(version: version)
+                case .voiceCall:
+                    RealtimeVoiceCallView {
+                        codex.realtimeVoice.isPresented = false
+                        if let threadID = codex.realtimeVoice.threadID {
+                            codex.handleNotificationOpen(threadId: threadID, turnId: nil)
+                        }
+                    }.environment(codex)
                 }
             }
             .alert(
@@ -366,6 +376,18 @@ struct ContentView: View {
 
     private var rootContentWithBannerOverlay: some View {
         rootContentWithPresentations
+            .safeAreaInset(edge: .bottom) {
+                if codex.realtimeVoice.isLive, !codex.realtimeVoice.isPresented {
+                    Button { codex.realtimeVoice.isPresented = true } label: {
+                        HStack {
+                            Image(systemName: "phone.fill")
+                            Text("Return to voice call")
+                            Spacer()
+                            Text(codex.realtimeVoice.statusText).font(.caption)
+                        }.padding(12).background(.regularMaterial)
+                    }.accessibilityHint("Returns to the active call without changing its task")
+                }
+            }
             .overlay {
                 if viewModel.isSwitchingMac {
                     deviceSwitchingOverlay
@@ -1622,6 +1644,10 @@ struct ContentView: View {
 
     // Serializes root-owned sheets under one priority list instead of letting each feature present itself.
     private func syncRootSheetPresentationIfNeeded() {
+        if case .voiceCall = presentedRootSheet, !codex.realtimeVoice.isPresented {
+            dismissPresentedRootSheet()
+            return
+        }
         if case .bridgeUpdate = presentedRootSheet,
            codex.bridgeUpdatePrompt == nil {
             dismissPresentedRootSheet()
@@ -1659,6 +1685,7 @@ struct ContentView: View {
             return nil
         }
 
+        if codex.realtimeVoice.isPresented { return .voiceCall }
         if let prompt = codex.bridgeUpdatePrompt {
             return .bridgeUpdate(prompt)
         }
@@ -1710,6 +1737,7 @@ struct ContentView: View {
     private var rootSheetPresentationFingerprint: String {
         [
             String(canPresentDeferredRootSheet),
+            String(codex.realtimeVoice.isPresented),
             codex.bridgeUpdatePrompt?.id.uuidString ?? "nil",
             pendingWhatsNewVersion ?? "nil",
             presentedRootSheet?.id ?? "nil",
@@ -1751,6 +1779,8 @@ struct ContentView: View {
             dismissBridgeUpdatePrompt()
         case .whatsNew(let version):
             dismissWhatsNewSheet(version: version)
+        case .voiceCall:
+            codex.realtimeVoice.isPresented = false
         }
 
         syncRootSheetPresentationIfNeeded()

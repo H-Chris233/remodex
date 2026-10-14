@@ -242,6 +242,10 @@ struct TurnView: View {
             )
         } as (() -> Void)? : nil)
         .environment(\.inlineCommitAndPushPhase, viewModel.inlineCommitAndPushPhase)
+        .task(id: thread.id) {
+            await codex.realtimeVoice.probe(codex: codex, threadID: thread.id)
+            codex.syncRealtimeTimeline(threadID: thread.id)
+        }
         .navigationTitle(resolvedThread.displayTitle)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -266,6 +270,13 @@ struct TurnView: View {
                 onTapMacHandoff: onTapMacHandoff,
                 onTapWorktreeHandoff: onTapWorktreeHandoff,
                 onTapNewChat: onTapNewChat,
+                onTapVoiceCall: resolvedThread.runtimeProvider == .opencode ? nil : {
+                    guard !voiceInput.isInputActive else {
+                        codex.lastErrorMessage = "Finish voice recording before starting a call."
+                        return
+                    }
+                    codex.realtimeVoice.start(codex: codex, thread: resolvedThread)
+                },
                 onTapTerminal: onOpenTerminal == nil ? nil : {
                     onOpenTerminal?(gitWorkingDirectory)
                 },

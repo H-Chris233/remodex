@@ -62,7 +62,7 @@ enum GPTVoiceTranscriptionError: LocalizedError {
 
 final class GPTVoiceTranscriptionManager: ObservableObject {
     private let audioSession = AVAudioSession.sharedInstance()
-    private static let audioSessionQueue = DispatchQueue(label: "com.remodex.voice.audio-session")
+    private var audioOwnershipID: UUID?
     private static let targetSampleRate: Double = 24_000
     private static let wavMimeType = "audio/wav"
     private static let m4aMimeType = "audio/mp4"
@@ -113,6 +113,7 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
         recordingSessionID += 1
         let sessionID = recordingSessionID
         isStarting = true
+        audioOwnershipID = UUID()
 
         let isPermissionGranted = await requestMicrophonePermission()
         codexLogVoiceRecording("microphone permission: \(isPermissionGranted ? "granted" : "denied")")
@@ -339,7 +340,8 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
     @MainActor
     private func configureAudioSession() async throws {
         do {
-            let snapshot = try await Self.performAudioSessionWork {
+            guard let owner = audioOwnershipID else { throw GPTVoiceTranscriptionError.notRecording }
+            let snapshot = try await VoiceAudioSessionOwnership.acquire(owner) {
                 let audioSession = AVAudioSession.sharedInstance()
                 try audioSession.setCategory(
                     .playAndRecord,
@@ -478,33 +480,12 @@ final class GPTVoiceTranscriptionManager: ObservableObject {
             if engine.isRunning { engine.stop() }
         }
         engine = nil
-        Self.deactivateAudioSessionInBackground()
-    }
-
-    // Keeps AVAudioSession activation/deactivation off the main actor to avoid
-    // system-gesture stalls on iOS 26 while preserving ordering across retries.
-    private static func performAudioSessionWork<T: Sendable>(
-        _ work: @Sendable @escaping () throws -> T
-    ) async throws -> T {
-        try await withCheckedThrowingContinuation { continuation in
-            audioSessionQueue.async {
-                do {
-                    continuation.resume(returning: try work())
-                } catch {
-                    continuation.resume(throwing: error)
-                }
+        if let owner = audioOwnershipID {
+            VoiceAudioSessionOwnership.release(owner) {
+                try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
             }
         }
-    }
-
-    private static func deactivateAudioSessionInBackground() {
-        audioSessionQueue.async {
-            do {
-                try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-            } catch {
-                codexLogVoiceRecording("audio session deactivate failed: \(error.localizedDescription)")
-            }
-        }
+        audioOwnershipID = nil
     }
 
     // ─── Resampling ──────────────────────────────────────────────

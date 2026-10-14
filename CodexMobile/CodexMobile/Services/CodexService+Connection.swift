@@ -150,6 +150,11 @@ extension CodexService {
 
     // Closes the socket and fails any in-flight requests.
     func disconnect(preserveReconnectIntent: Bool = false) async {
+        realtimeVoice.connectionLost(allowRecovery: preserveReconnectIntent)
+        realtimeTimelineTasks.values.forEach { $0.cancel() }
+        realtimeTimelineTasks.removeAll()
+        realtimeTimelineSyncedAt.removeAll()
+        supportsRealtimeTimeline = true
         resetDesktopSidebarRequests()
         cancelCurrentSocketConnection()
 
@@ -504,6 +509,7 @@ extension CodexService {
 
         cancelRuntimeSettingsUpdates()
         let disposition = receiveErrorDisposition(for: error, relayCloseCode: relayCloseCode)
+        realtimeVoice.connectionLost(allowRecovery: disposition.shouldAutoReconnectOnForeground)
         isConnected = false
         isInitialized = false
         shouldAutoReconnectOnForeground = disposition.shouldAutoReconnectOnForeground

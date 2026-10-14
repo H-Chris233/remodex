@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+        E1B100000000000000000003 /* WebRTC in Frameworks */ = {
+            isa = PBXBuildFile; productRef = E1B100000000000000000002 /* WebRTC */;
+        };
 		A1385041C02745E5B96B0203 /* CodexDesktopSidebarTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1385041C02745E5B96B0204 /* CodexDesktopSidebarTests.swift */; };
         A1385041C02745E5B96B0201 /* pairing-v3.json in Resources */ = {isa = PBXBuildFile; fileRef = A1385041C02745E5B96B0202 /* pairing-v3.json */; };
 		EAC174A118B04EDC99C18401 /* AssistantMemoryCitationParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EAC174A118B04EDC99C18402 /* AssistantMemoryCitationParserTests.swift */; };
@@ -247,6 +250,7 @@
 				A4B0C1D2E3F4051627384A10 /* UIKit.framework in Frameworks */,
 				A4B0C1D2E3F4051627384A0C /* libc++.tbd in Frameworks */,
 				A4B0C1D2E3F4051627384A0E /* libz.tbd in Frameworks */,
+				E1B100000000000000000003 /* WebRTC in Frameworks */,
 				C078C1A22F79000100BEEF01 /* Citadel in Frameworks */,
 				D1A000000000000000000200 /* Runestone in Frameworks */,
 				D1A000000000000000000201 /* TreeSitterBashRunestone in Frameworks */,
@@ -561,6 +565,7 @@
 			);
 			name = CodexMobile;
 			packageProductDependencies = (
+				E1B100000000000000000002 /* WebRTC */,
 				C078C1A12F79000100BEEF01 /* Citadel */,
 				C0A34C392FBA9D04007294E3 /* RemodexTextKit */,
 				D1A000000000000000000100 /* Runestone */,
@@ -617,6 +622,7 @@
 			mainGroup = C09A76A52F4B8D7B003B3F3A;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
+				E1B100000000000000000001 /* XCRemoteSwiftPackageReference "WebRTC" */,
 				C078C1A02F79000100BEEF01 /* XCRemoteSwiftPackageReference "Citadel" */,
 				C0A34C382FBA9D04007294E3 /* XCRemoteSwiftPackageReference "RemodexTextKit" */,
 				D1A000000000000000000001 /* XCRemoteSwiftPackageReference "Runestone" */,
@@ -1278,6 +1284,11 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+        E1B100000000000000000001 /* XCRemoteSwiftPackageReference "WebRTC" */ = {
+            isa = XCRemoteSwiftPackageReference;
+            repositoryURL = "https://github.com/stasel/WebRTC.git";
+            requirement = { kind = exactVersion; version = 154.0.0; };
+        };
 		C078C1A02F79000100BEEF01 /* XCRemoteSwiftPackageReference "Citadel" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/orlandos-nl/Citadel.git";
@@ -1313,6 +1324,11 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+        E1B100000000000000000002 /* WebRTC */ = {
+            isa = XCSwiftPackageProductDependency;
+            package = E1B100000000000000000001 /* XCRemoteSwiftPackageReference "WebRTC" */;
+            productName = WebRTC;
+        };
 		C078C1A12F79000100BEEF01 /* Citadel */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = C078C1A02F79000100BEEF01 /* XCRemoteSwiftPackageReference "Citadel" */;

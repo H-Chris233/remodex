@@ -34,6 +34,7 @@ struct TurnToolbarContent: ToolbarContent {
     var onTapMacHandoff: (() -> Void)?
     var onTapWorktreeHandoff: (() -> Void)?
     var onTapNewChat: (() -> Void)?
+    var onTapVoiceCall: (() -> Void)?
     var onTapTerminal: (() -> Void)?
     var onTapRepoDiff: (() -> Void)?
     let onGitAction: (TurnGitActionKind) -> Void
@@ -154,6 +155,9 @@ struct TurnToolbarContent: ToolbarContent {
         canTapTerminal: Bool
     ) -> [TurnThreadActionMenuItem] {
         var actions: [TurnThreadActionMenuItem] = []
+        if let onTapVoiceCall {
+            actions.append(TurnThreadActionMenuItem(title: "Voice call", icon: .system("phone"), isEnabled: true, handler: onTapVoiceCall))
+        }
         if onTapMacHandoff != nil {
             actions.append(TurnThreadActionMenuItem(
                 title: "Hand off to Desktop",

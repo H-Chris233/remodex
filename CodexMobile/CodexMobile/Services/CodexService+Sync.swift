@@ -116,7 +116,8 @@ extension CodexService {
                 stopSyncLoop()
             }
         } else {
-            stopWebSocketKeepAliveLoop()
+            if realtimeVoice.isLive { startWebSocketKeepAliveLoop() }
+            else { stopWebSocketKeepAliveLoop() }
             if isConnected && isInitialized {
                 startSyncLoop()
                 requestImmediateSync(threadId: activeThreadId)

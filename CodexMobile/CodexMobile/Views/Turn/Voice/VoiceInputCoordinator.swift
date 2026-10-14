@@ -277,6 +277,10 @@ final class VoiceInputCoordinator: ObservableObject {
         guard !isPreflighting else {
             return
         }
+        guard !codex.realtimeVoice.isLive else {
+            presentRecovery(for: .generic("End the voice call before recording a voice note."), codex: codex)
+            return
+        }
 
         guard codex.isConnected else {
             presentRecovery(for: .reconnectRequired, codex: codex)

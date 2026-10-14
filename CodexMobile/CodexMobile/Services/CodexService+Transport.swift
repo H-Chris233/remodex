@@ -382,7 +382,7 @@ extension CodexService {
     }
 
     func startWebSocketKeepAliveLoop() {
-        guard isConnected, isInitialized, isAppInForeground else {
+        guard isConnected, isInitialized, isAppInForeground || realtimeVoice.isLive else {
             stopWebSocketKeepAliveLoop()
             return
         }
@@ -404,7 +404,7 @@ extension CodexService {
                 guard !Task.isCancelled else {
                     return
                 }
-                guard self.isConnected, self.isInitialized, self.isAppInForeground else {
+                guard self.isConnected, self.isInitialized, self.isAppInForeground || self.realtimeVoice.isLive else {
                     self.stopWebSocketKeepAliveLoop()
                     return
                 }
