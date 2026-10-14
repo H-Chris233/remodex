@@ -1675,6 +1675,8 @@ test("shared endpoint performs a real handshake and keeps realtime traffic out o
   let relaySocket;
   let fakeCodex;
   let bridge;
+  let canReadSidebar;
+  const codexHome = require("../src/codex-home").resolveCodexHome();
   t.after(() => { bridge?.stop(); relaySocket?.close(); relayServer.close(); });
   await new Promise((resolve) => relayServer.once("listening", resolve));
   relayServer.on("connection", (socket) => {
@@ -1683,6 +1685,17 @@ test("shared endpoint performs a real handshake and keeps realtime traffic out o
   });
   const { startBridge } = loadBridgeWithTestDoubles({
     createCodexTransportImpl() { fakeCodex = createFakeCodexTransport(); return fakeCodex; },
+    voiceRuntimeModule: {
+      readRuntimeConfig: () => ({ codexHome }),
+      resolveVoiceEndpoint: () => "ws://127.0.0.1:4510",
+    },
+    desktopSidebarModule: {
+      normalizedPath: require("../src/desktop-sidebar").normalizedPath,
+      createDesktopSidebarService({ enabled }) {
+        canReadSidebar = enabled;
+        return { invalidate() {} };
+      },
+    },
     createBridgeSecureTransportImpl() {
       return {
         ...createPlaintextSecureTransport(),
@@ -1699,11 +1712,13 @@ test("shared endpoint performs a real handshake and keeps realtime traffic out o
   const initialize = (id) => JSON.stringify({
     id, method: "initialize", params: { clientInfo: { name: "voice_test", version: "1" }, capabilities: { experimentalApi: true } },
   });
+  assert.equal(canReadSidebar(), false, "external initialization has not yet confirmed the local Codex home");
   relaySocket.send(initialize("first-init"));
   await waitFor(() => fakeCodex.sent.some((message) => message.id === "first-init"));
   assert.equal(messages.some((message) => message.id === "first-init"), false);
-  fakeCodex.emitMessage({ id: "first-init", result: { userAgent: "codex/0.162.1", platformOs: "windows", futureCapability: true } });
+  fakeCodex.emitMessage({ id: "first-init", result: { userAgent: "codex/0.162.1", platformOs: "windows", codexHome, futureCapability: true } });
   await waitForMessage(messages, (message) => message.id === "first-init");
+  assert.equal(canReadSidebar(), true, "the verified local shared runtime keeps Desktop sidebar organization");
   relaySocket.send(JSON.stringify({ method: "initialized" }));
   await waitFor(() => fakeCodex.sent.some((message) => message.method === "initialized"));
   relaySocket.send(initialize("warm-init"));
@@ -1728,6 +1743,8 @@ test("shared endpoint performs a real handshake and keeps realtime traffic out o
 function loadBridgeWithTestDoubles({
   createCodexTransportImpl,
   createBridgeSecureTransportImpl = createPlaintextSecureTransport,
+  desktopSidebarModule = null,
+  voiceRuntimeModule = null,
   createOpenCodeRuntimeImpl = null,
   desktopIpcActionFollowerModule = null,
   desktopIpcLiveOwnerModule = null,
@@ -1737,6 +1754,8 @@ function loadBridgeWithTestDoubles({
   const originalLoad = Module._load;
   delete require.cache[bridgePath];
   Module._load = function loadWithBridgeDoubles(request, parent, isMain) {
+    if (parent?.filename === bridgePath && request === "./desktop-sidebar" && desktopSidebarModule) return desktopSidebarModule;
+    if (parent?.filename === bridgePath && request === "./voice-runtime" && voiceRuntimeModule) return voiceRuntimeModule;
     if (parent?.filename === bridgePath && request === "./codex-transport") {
       return { createCodexTransport: createCodexTransportImpl };
     }

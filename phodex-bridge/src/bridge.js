@@ -32,7 +32,8 @@ const {
 const { printQR } = require("./qr");
 const { rememberActiveThread } = require("./session-state");
 const { handleDesktopRequest } = require("./desktop-handler");
-const { createDesktopSidebarService } = require("./desktop-sidebar");
+const { createDesktopSidebarService, normalizedPath } = require("./desktop-sidebar");
+const { readRuntimeConfig, resolveVoiceEndpoint } = require("./voice-runtime");
 const { readDaemonConfig, writeDaemonConfig } = require("./daemon-state");
 const { handleGitRequest } = require("./git-handler");
 const { handleThreadContextRequest } = require("./thread-context-handler");
@@ -48,7 +49,7 @@ const {
 const { createBridgePackageVersionStatusReader } = require("./package-version-status");
 const { createPushNotificationServiceClient } = require("./push-notification-service-client");
 const { createPushNotificationTracker } = require("./push-notification-tracker");
-const { resolveCodexGeneratedImagesRoot } = require("./codex-home");
+const { resolveCodexGeneratedImagesRoot, resolveCodexHome } = require("./codex-home");
 const {
   loadOrCreateBridgeDeviceState,
   rememberLastSeenClientDeviceKind,
@@ -65,6 +66,7 @@ const {
   isUserRoleItem,
   readUserItemText,
   sanitizeUserRoleItem,
+  isRealtimeDelegationText,
   visibleUserPromptText,
 } = require("./desktop-ipc-shared");
 const {
@@ -972,8 +974,19 @@ function startBridge({
     appPath: config.codexAppPath,
     logPrefix: "[remodex]",
   });
+  let sharedVoiceHome = "";
+  if (config.codexEndpoint) {
+    try {
+      const runtime = readRuntimeConfig();
+      if (runtime && resolveVoiceEndpoint(runtime) === config.codexEndpoint) sharedVoiceHome = runtime.codexHome;
+    } catch { /* Unverified endpoints must not read local Desktop organization. */ }
+  }
   const desktopSidebar = createDesktopSidebarService({
-    sendCodexRequest, enabled: !config.codexEndpoint, deviceId: deviceState.macDeviceId,
+    sendCodexRequest,
+    enabled: () => !config.codexEndpoint || Boolean(sharedVoiceHome
+      && normalizedPath(codexInitializeResult?.codexHome) === normalizedPath(sharedVoiceHome)
+      && normalizedPath(resolveCodexHome()) === normalizedPath(sharedVoiceHome)),
+    deviceId: deviceState.macDeviceId,
     enrichThread: enrichThreadSummary,
     listSupplementalThreads: async () => {
       await refreshOpenCodeThreadCatalog();
@@ -1037,7 +1050,7 @@ function startBridge({
       lastError: error.message,
     });
     if (config.codexEndpoint) {
-      console.error(`[remodex] Failed to connect to Codex endpoint: ${config.codexEndpoint}`);
+      console.error(`[remodex] Failed to connect to Codex endpoint: ${codex.describe()}`);
     } else {
       console.error("[remodex] Failed to start `codex app-server`.");
       console.error(`[remodex] Launch command: ${codex.describe()}`);
@@ -4698,7 +4711,9 @@ function sanitizeLiveUserNotification(parsed) {
   }
   return visible === parsed.params[key] ? parsed : {
     ...parsed,
-    params: { ...parsed.params, [key]: visible },
+    params: { ...parsed.params, [key]: visible,
+      ...(isRealtimeDelegationText(parsed.params[key]) ? { remodexRealtimeDelegation: true } : {}),
+    },
   };
 }
 
@@ -5356,6 +5371,7 @@ function compactHistoryItemForRelay(item, maxChars) {
     timezone: relayScalarHistoryMetadata(item?.timezone),
     time_zone: relayScalarHistoryMetadata(item?.time_zone),
     relayPayloadTruncated: true,
+    ...(item?.remodexRealtimeDelegation === true ? { remodexRealtimeDelegation: true } : {}),
   };
   const tailText = maxChars > 0 ? firstRelayTextTail(item, maxChars) : "";
   if (tailText) {

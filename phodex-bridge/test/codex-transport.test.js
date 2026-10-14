@@ -85,6 +85,7 @@ test("endpoint transport only sends outbound messages after the websocket opens"
   const socket = FakeWebSocket.latestInstance;
   assert.ok(socket);
   assert.equal(socket.endpoint, "ws://127.0.0.1:4321/codex");
+  assert.equal(transport.describe(), "ws://127.0.0.1:4321", "diagnostics must omit a gateway credential path");
 
   transport.send('{"id":"init-1","method":"initialize"}');
   transport.send('{"id":"list-1","method":"thread/list"}');

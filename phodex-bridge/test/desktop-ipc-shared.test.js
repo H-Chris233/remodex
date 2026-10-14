@@ -431,3 +431,16 @@ test("prefers the Codex home bus when both sockets are listening", { skip: proce
 
   assert.equal(resolveDefaultIpcSocketPath(), codexHomeSocket);
 });
+
+
+test("realtime delegation keeps legacy text and stable identity while marking its canonical duplicate", () => {
+  const text = "<realtime_delegation><input>Update the report</input></realtime_delegation>";
+  const original = { id: "voice-task-input", type: "userMessage", content: [{ type: "text", text }] };
+  assert.deepEqual(sanitizeUserRoleItem(original), {
+    id: original.id, type: original.type, content: [{ type: "text", text: "Update the report" }],
+    remodexRealtimeDelegation: true,
+  });
+  assert.equal(original.content[0].text, text);
+  assert.equal(sanitizeUserRoleItem({ ...original, content: [{ type: "text", text: `Explain ${text}` }] }).remodexRealtimeDelegation, undefined);
+  assert.equal(sanitizeUserRoleItem({ ...original, type: "agentMessage" }).remodexRealtimeDelegation, undefined);
+});

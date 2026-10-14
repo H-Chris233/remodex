@@ -147,7 +147,7 @@ function createDesktopSidebarService({
   let currentScope = null;
 
   async function identity() {
-    if (!enabled) throw sidebarError("sidebar_unsupported", "Desktop sidebar is unavailable for an external Codex endpoint.");
+    if (!(typeof enabled === "function" ? enabled() : enabled)) throw sidebarError("sidebar_unsupported", "Desktop sidebar is unavailable for an external Codex endpoint.");
     const auth = await sendCodexRequest("getAuthStatus", { includeToken: true, refreshToken: false });
     const context = buildThreadReadStateContext(auth);
     if (context?.identity.kind !== "chatgpt") {

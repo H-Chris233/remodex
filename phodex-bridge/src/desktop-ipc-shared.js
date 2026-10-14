@@ -328,6 +328,10 @@ function sanitizeUserInputEntries(entries) {
   return sanitized;
 }
 
+function isRealtimeDelegationText(text) {
+  return typeof text === "string" && extractNestedRuntimeText(text, "realtime_delegation", "input") !== null;
+}
+
 function sanitizeUserRoleItem(item) {
   if (!isUserRoleItem(item)) {
     return item;
@@ -366,6 +370,11 @@ function sanitizeUserRoleItem(item) {
     return null;
   }
 
+  // Keep the visible fallback for older clients while canonical Voice clients can avoid a second user bubble.
+  if (isRealtimeDelegationText(readUserItemText(item)) && sanitized.remodexRealtimeDelegation !== true) {
+    sanitized = { ...sanitized, remodexRealtimeDelegation: true };
+    changed = true;
+  }
   return changed ? sanitized : item;
 }
 
@@ -726,6 +735,7 @@ module.exports = {
   safeParseJSON,
   sanitizeUserInputEntries,
   sanitizeUserRoleItem,
+  isRealtimeDelegationText,
   toSocketPathCandidatesResolver,
   toSocketPathResolver,
   visibleUserPromptText,

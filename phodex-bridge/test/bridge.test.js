@@ -1887,6 +1887,21 @@ test("sanitizeLiveUserNotification filters fallback context and rewrites visible
   });
   assert.equal(heartbeat.params.message, "Check CI.");
 
+  const voiceEnvelope = "<realtime_delegation><input>Update the report.</input></realtime_delegation>";
+  const voiceLegacy = sanitizeLiveUserNotification({ method: "codex/event/user_message", params: {
+    threadId: "t", message: voiceEnvelope,
+  } });
+  assert.equal(voiceLegacy.params.message, "Update the report.");
+  assert.equal(voiceLegacy.params.remodexRealtimeDelegation, true);
+  const voiceItem = sanitizeLiveUserNotification({ method: "item/started", params: {
+    threadId: "t", item: { type: "userMessage", id: "voice-input", content: [
+      { type: "text", text: voiceEnvelope }, { type: "image", url: "file://fixture.png" },
+    ] },
+  } });
+  assert.equal(voiceItem.params.item.remodexRealtimeDelegation, true);
+  assert.equal(voiceItem.params.item.id, "voice-input");
+  assert.deepEqual(voiceItem.params.item.content[1], { type: "image", url: "file://fixture.png" });
+
   const mixedItem = sanitizeLiveUserNotification({
     method: "item/completed",
     params: {
@@ -4147,4 +4162,19 @@ test("sanitizeThreadHistoryImagesForRelay truncates the newest oversized text it
   assert.equal(item.relayTextTailTruncated, true);
   assert.equal(item.text.startsWith("…\n"), true);
   assert.equal(item.text.includes("header"), false);
+});
+
+
+test("oversized history keeps the native Voice delegation identity marker", () => {
+  const response = JSON.parse(sanitizeThreadHistoryImagesForRelay(JSON.stringify({
+    id: "voice-history", result: { data: [{ id: "turn-voice", items: [
+      { id: "delegated", type: "userMessage", content: [{ type: "text", text: "<realtime_delegation><input>Fix it</input></realtime_delegation>" }] },
+      { id: "large-output", type: "assistant_message", text: "A".repeat(4 * 1024 * 1024) },
+    ] }] },
+  }), "thread/turns/list"));
+  const item = response.result.data[0].items[0];
+  assert.equal(response.result.remodexPageCompactedForRelay, true);
+  assert.equal(item.id, "delegated");
+  assert.equal(item.remodexRealtimeDelegation, true);
+  assert.equal(item.text, "Fix it");
 });

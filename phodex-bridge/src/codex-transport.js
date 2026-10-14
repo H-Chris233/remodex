@@ -338,7 +338,7 @@ function createWebSocketTransport({ endpoint, WebSocketImpl = WebSocket }) {
       if (socket !== nextSocket || stopped) return;
       hasOpened = true;
       clearTimeout(startupTimer);
-      listeners.emitStarted({ mode: "websocket", launchDescription: endpoint });
+      listeners.emitStarted({ mode: "websocket", launchDescription: new URL(endpoint).origin });
     });
     nextSocket.on("close", (code, reason) => {
       if (socket !== nextSocket || stopped) return;
@@ -360,7 +360,7 @@ function createWebSocketTransport({ endpoint, WebSocketImpl = WebSocket }) {
   return {
     mode: "websocket",
     describe() {
-      return endpoint;
+      return new URL(endpoint).origin;
     },
     send(message) {
       if (socket.readyState === openState) {
