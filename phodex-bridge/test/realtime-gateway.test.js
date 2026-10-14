@@ -85,7 +85,7 @@ async function harness(t, options = {}) {
     for (const record of records) record.socket.terminate();
     await new Promise((resolve) => native.close(resolve));
   });
-  async function client(experimental = true, threadId = "thread-a") {
+  async function client(experimental = true, threadId = "thread-a", name = "test-client") {
     const socket = new WebSocket(address.url);
     sockets.push(socket);
     const messages = [], pending = new Map();
@@ -102,7 +102,7 @@ async function harness(t, options = {}) {
     const rpc = (method, params, id = ++nextId) => new Promise((resolve) => {
       pending.set(id, resolve); socket.send(JSON.stringify({ id, method, params }));
     });
-    await rpc("initialize", { clientInfo: { name: "test-client", version: "1" },
+    await rpc("initialize", { clientInfo: { name, version: "1" },
       capabilities: { experimentalApi: experimental } });
     socket.send(JSON.stringify({ method: "initialized" }));
     if (threadId) await rpc("thread/resume", { threadId, excludeTurns: true });
@@ -250,21 +250,21 @@ test("native rejection before submit releases ownership; unloaded tasks never co
     && m.request.params.threadId === "unloaded"), false);
 });
 
-test("control-origin server requests round-trip to the task owner after Voice hangs up", async (t) => {
+test("control-origin questions round-trip to the task owner after Voice hangs up", async (t) => {
   const h = await harness(t);
   const phone = await h.client();
   await phoneStart(phone);
   await until(() => phone.messages.some((m) => m.method === "thread/realtime/started"));
   await phone.rpc("remodex/realtime/stop", phoneParams());
   await until(() => phone.messages.some((m) => m.method === "thread/realtime/closed"));
-  h.control.socket.send(JSON.stringify({ id: 42, method: "item/tool/call", params: { threadId: "thread-a", tool: "example" } }));
-  await until(() => phone.messages.some((m) => m.method === "item/tool/call"));
-  const request = phone.messages.find((m) => m.method === "item/tool/call");
+  h.control.socket.send(JSON.stringify({ id: 42, method: "item/tool/requestUserInput", params: { threadId: "thread-a", itemId: "q-a", turnId: "turn-a", questions: [] } }));
+  await until(() => phone.messages.some((m) => m.method === "item/tool/requestUserInput"));
+  const request = phone.messages.find((m) => m.method === "item/tool/requestUserInput");
   assert.notEqual(request.id, 42);
-  phone.socket.send(JSON.stringify({ id: request.id, result: { content: [{ type: "text", text: "done" }] } }));
+  phone.socket.send(JSON.stringify({ id: request.id, result: { answers: { q: { answers: ["yes"] } } } }));
   await until(() => h.responses.length === 1);
   assert.equal(h.responses[0].record, h.control);
-  assert.deepEqual(h.responses[0].request, { id: 42, result: { content: [{ type: "text", text: "done" }] } });
+  assert.deepEqual(h.responses[0].request, { id: 42, result: { answers: { q: { answers: ["yes"] } } } });
 });
 
 test("control reconnection initializes and checks the loaded task before native cleanup attaches its listener", async (t) => {
@@ -279,10 +279,40 @@ test("control reconnection initializes and checks the loaded task before native 
   assert.ok(methods.indexOf("initialize") < methods.indexOf("thread/loaded/list"));
   assert.ok(methods.indexOf("thread/loaded/list") < methods.indexOf("thread/realtime/stop"));
   assert.equal(methods.includes("thread/resume"), false);
+  const recovering = phone.messages.find((m) => m.method === "remodex/realtime/recovering");
+  assert.deepEqual(recovering.params, { threadId: "thread-a", remodexRealtimeSessionId: "phone-session-a",
+    remodexRealtimeRecovery: "controlLost" });
+  const heartbeat = await phone.rpc("remodex/realtime/heartbeat", phoneParams());
+  assert.deepEqual(heartbeat.error.data, { errorCode: "closing", remodexRealtimeRecovery: "controlLost" });
   assert.ok((await desktopStart(desktop)).error);
   h.emit("thread/realtime/closed", { threadId: "thread-a", reason: "requested" });
   await until(() => phone.messages.some((m) => m.method === "thread/realtime/closed"));
+  const closed = phone.messages.find((m) => m.method === "thread/realtime/closed");
+  assert.equal(closed.params.reason, "requested");
+  assert.equal(closed.params.remodexRealtimeRecovery, "controlLost");
   assert.deepEqual((await desktopStart(desktop)).result, {});
+});
+
+for (const intent of ["stop before loss", "stop during recovery", "expired lease"]) test(`control recovery never restarts a call with ${intent}`, async (t) => {
+  let clock = 0;
+  const h = await harness(t, { closed: false, gateway: { now: () => clock } });
+  const phone = await h.client();
+  await phoneStart(phone);
+  await until(() => phone.messages.some((m) => m.method === "thread/realtime/started"));
+  if (intent === "stop before loss") await phone.rpc("remodex/realtime/stop", phoneParams());
+  const previous = h.control;
+  previous.socket.terminate();
+  await until(() => h.control !== previous && h.stops.length > 0);
+  if (intent === "stop during recovery") await phone.rpc("remodex/realtime/stop", phoneParams());
+  if (intent === "expired lease") clock = 45_001;
+  const heartbeat = await phone.rpc("remodex/realtime/heartbeat", phoneParams());
+  assert.equal(heartbeat.error.data.remodexRealtimeRecovery, undefined);
+  if (intent === "stop before loss") assert.equal(phone.messages.some((m) => m.method === "remodex/realtime/recovering"), false);
+  h.emit("thread/realtime/closed", { threadId: "thread-a", reason: "requested" });
+  await until(() => phone.messages.some((m) => m.method === "thread/realtime/closed"));
+  const closed = phone.messages.find((m) => m.method === "thread/realtime/closed");
+  assert.equal(closed.params.reason, "requested");
+  assert.equal(closed.params.remodexRealtimeRecovery, undefined);
 });
 
 test("Voice cannot bypass a client's experimental initialization", async (t) => {
@@ -456,4 +486,164 @@ test("device user verification reaches the native-selected app even when control
   phone.socket.send(JSON.stringify({ id: 91, result: { action: "decline" } }));
   await until(() => h.responses.length === 1);
   assert.equal(h.responses[0].record, selected);
+});
+
+
+test("coding progress after hangup survives control reconnect without duplicating subscribed owner deltas", async (t) => {
+  const h = await harness(t);
+  const phone = await h.client();
+  await phoneStart(phone);
+  await until(() => phone.messages.some((message) => message.method === "thread/realtime/started"));
+  await phone.rpc("remodex/realtime/stop", phoneParams());
+  await until(() => phone.messages.some((message) => message.method === "thread/realtime/closed"));
+  const previous = h.control;
+  previous.socket.terminate();
+  await until(() => h.control !== previous && h.control.initialized);
+  await delay(25);
+  h.emit("item/agentMessage/delta", { threadId: "thread-a", turnId: "voice-task", itemId: "item-a", delta: "after-reconnect" });
+  await until(() => phone.messages.some((message) => message.params?.delta === "after-reconnect"), 250);
+  await delay(15);
+  assert.equal(phone.messages.filter((message) => message.params?.delta === "after-reconnect").length, 1);
+});
+
+test("a mapped pending approval keeps its original native request ID across control reconnect", async (t) => {
+  const h = await harness(t);
+  const phone = await h.client();
+  await phoneStart(phone);
+  await until(() => phone.messages.some((message) => message.method === "thread/realtime/started"));
+  await phone.rpc("remodex/realtime/stop", phoneParams());
+  await until(() => phone.messages.some((message) => message.method === "thread/realtime/closed"));
+  const method = "item/commandExecution/requestApproval";
+  h.control.socket.send(JSON.stringify({ id: 119, method,
+    params: { threadId: "thread-a", itemId: "command-a", turnId: "voice-task" } }));
+  await until(() => phone.messages.some((message) => message.method === method));
+  const prompt = phone.messages.find((message) => message.method === method);
+  const previous = h.control;
+  previous.socket.terminate();
+  await until(() => h.control !== previous && h.control.initialized);
+  phone.socket.send(JSON.stringify({ id: prompt.id, result: { decision: "accept" } }));
+  await until(() => h.responses.length === 1);
+  assert.equal(h.responses[0].request.id, 119);
+  assert.deepEqual(h.responses[0].request.result, { decision: "accept" });
+  assert.equal(phone.messages.filter((message) => message.method === method).length, 1);
+});
+
+
+test("shared dynamic tool fanout executes only on the task's Desktop and never elicits mobile unsupported replies", async (t) => {
+  const h = await harness(t);
+  const desktop = await h.client(true, "thread-a", "codex_desktop");
+  const { thread } = (await desktop.rpc("thread/start", { cwd: "C:/workspace", dynamicTools: [
+    { name: "example", description: "Desktop tool", inputSchema: { type: "object" } },
+  ] })).result;
+  const observer = await h.client(true, thread.id, "codex_desktop");
+  const phone = await h.client(true, thread.id, "codexmobile_ios");
+  const request = { id: 190, method: "item/tool/call", params: {
+    threadId: thread.id, turnId: "turn-a", callId: "tool-a", tool: "example", arguments: {},
+  } };
+  for (const record of [...h.records].reverse()) if (record.threads.has(thread.id))
+    record.socket.send(JSON.stringify(request));
+  await until(() => desktop.messages.some((message) => message.method === "item/tool/call"));
+  await delay(20);
+  assert.equal(desktop.messages.filter((message) => message.method === "item/tool/call").length, 1);
+  assert.equal(observer.messages.filter((message) => message.method === "item/tool/call").length, 0);
+  assert.equal(phone.messages.filter((message) => message.method === "item/tool/call").length, 0);
+  const received = desktop.messages.find((message) => message.method === "item/tool/call");
+  desktop.socket.send(JSON.stringify({ id: received.id, result: { success: true, contentItems: [] } }));
+  await until(() => h.responses.length === 1);
+  assert.equal(h.responses[0].request.id, 190);
+  assert.deepEqual(h.responses[0].request.result, { success: true, contentItems: [] });
+});
+
+test("native and mapped mobile approvals carry shared-runtime provenance without changing Desktop prompts", async (t) => {
+  const h = await harness(t);
+  const desktop = await h.client(true, "thread-a", "codex_desktop");
+  const phone = await h.client(true, "thread-a", "codexmobile_ios");
+  const method = "item/commandExecution/requestApproval";
+  for (const record of h.records) if (record.threads.has("thread-a")) record.socket.send(JSON.stringify({
+    id: 200, method, params: { threadId: "thread-a", itemId: "native-a", turnId: "turn-a" },
+  }));
+  await until(() => phone.messages.some((message) => message.id === 200));
+  assert.equal(phone.messages.find((message) => message.id === 200).params.remodexActionSource, "sharedRuntime");
+  assert.equal(desktop.messages.find((message) => message.id === 200).params.remodexActionSource, undefined);
+  await phoneStart(phone);
+  h.control.socket.send(JSON.stringify({ id: 201, method, params: {
+    threadId: "thread-a", itemId: "mapped-a", turnId: "turn-a",
+  } }));
+  await until(() => phone.messages.some((message) => message.params?.itemId === "mapped-a"));
+  assert.equal(phone.messages.find((message) => message.params?.itemId === "mapped-a").params.remodexActionSource, "sharedRuntime");
+});
+
+test("another subscriber's real approval resolution clears the mapped prompt while control is down", async (t) => {
+  const h = await harness(t, { gateway: { reconnectDelayMs: 100 } });
+  const phone = await h.client(), desktop = await h.client();
+  await phoneStart(phone);
+  await until(() => phone.messages.some((message) => message.method === "thread/realtime/started"));
+  await phone.rpc("remodex/realtime/stop", phoneParams());
+  await until(() => phone.messages.some((message) => message.method === "thread/realtime/closed"));
+  h.control.socket.send(JSON.stringify({ id: 210, method: "item/commandExecution/requestApproval", params: {
+    threadId: "thread-a", itemId: "approval-a", turnId: "turn-a",
+  } }));
+  await until(() => phone.messages.some((message) => message.params?.itemId === "approval-a"));
+  const prompt = phone.messages.find((message) => message.params?.itemId === "approval-a");
+  const previous = h.control;
+  previous.socket.terminate();
+  await delay(15);
+  h.emit("serverRequest/resolved", { threadId: "thread-a", requestId: 210 });
+  await until(() => phone.messages.some((message) => message.method === "serverRequest/resolved" && message.params.requestId === prompt.id), 250);
+  phone.socket.send(JSON.stringify({ id: prompt.id, result: { decision: "accept" } }));
+  await until(() => h.control !== previous && h.control.initialized);
+  await delay(30);
+  assert.equal(h.responses.length, 0);
+});
+
+
+test("restoring an unsubscribed empty task holds a requested-close barrier before the next Voice start", async (t) => {
+  const h = await harness(t, { emptyRollout: true, closed: false });
+  const desktop = await h.client(true, null), phone = await h.client(true, null);
+  const { thread } = (await desktop.rpc("thread/start", { cwd: "C:/workspace" })).result;
+  await phone.rpc("remodex/realtime/start", { ...phoneParams(), threadId: thread.id, outputModality: "audio" });
+  await until(() => phone.messages.some((message) => message.method === "thread/realtime/started"));
+  await phone.rpc("remodex/realtime/stop", { ...phoneParams(), threadId: thread.id });
+  h.emit("thread/realtime/closed", { threadId: thread.id, reason: "requested" });
+  await until(() => phone.messages.some((message) => message.method === "thread/realtime/closed"));
+  const previous = h.control;
+  previous.socket.terminate();
+  await until(() => h.control !== previous && h.stops.length === 2);
+  const next = desktopStart(desktop, thread.id);
+  await delay(25);
+  assert.equal(h.starts.length, 1);
+  h.emit("thread/realtime/closed", { threadId: thread.id, reason: "requested" });
+  assert.deepEqual((await next).result, {});
+  assert.equal(h.starts.length, 2);
+  h.emit("item/agentMessage/delta", { threadId: thread.id, turnId: "turn-a", itemId: "item-a", delta: "resumed" });
+  await until(() => desktop.messages.some((message) => message.params?.delta === "resumed"));
+  assert.equal(desktop.messages.filter((message) => message.params?.delta === "resumed").length, 1);
+});
+
+test("an approval answered during the control gap retains its native ID and a later resolution prevents replays", async (t) => {
+  const h = await harness(t, { gateway: { reconnectDelayMs: 100 } });
+  const phone = await h.client();
+  await phoneStart(phone);
+  await until(() => phone.messages.some((message) => message.method === "thread/realtime/started"));
+  await phone.rpc("remodex/realtime/stop", phoneParams());
+  await until(() => phone.messages.some((message) => message.method === "thread/realtime/closed"));
+  const request = { id: 215, method: "item/commandExecution/requestApproval", params: {
+    threadId: "thread-a", itemId: "pending-gap", turnId: "turn-a",
+  } };
+  h.control.socket.send(JSON.stringify(request));
+  await until(() => phone.messages.some((message) => message.params?.itemId === "pending-gap"));
+  const prompt = phone.messages.find((message) => message.params?.itemId === "pending-gap");
+  const previous = h.control;
+  previous.socket.terminate();
+  await delay(15);
+  phone.socket.send(JSON.stringify({ id: prompt.id, result: { decision: "accept" } }));
+  await until(() => h.responses.length === 1);
+  assert.equal(h.responses[0].request.id, 215);
+  h.emit("serverRequest/resolved", { threadId: "thread-a", requestId: 215 });
+  await until(() => phone.messages.some((message) => message.params?.requestId === prompt.id));
+  await until(() => h.control !== previous && h.control.initialized);
+  h.control.socket.send(JSON.stringify(request));
+  await delay(20);
+  assert.equal(phone.messages.filter((message) => message.params?.itemId === "pending-gap").length, 1);
+  assert.equal(h.responses.length, 1);
 });
