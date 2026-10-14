@@ -3,18 +3,20 @@ param(
     [ValidateSet('Install', 'Start', 'Stop', 'Status', 'Uninstall', 'Run')]
     [string]$Action,
     [Parameter(Mandatory = $true)][string]$StateDir,
-    [Parameter(Mandatory = $true)][string]$TaskName
+    [Parameter(Mandatory = $true)][string]$TaskName,
+    [ValidateSet('bridge', 'voice-runtime')][string]$WorkerKind = 'bridge'
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $StateDir = [IO.Path]::GetFullPath($StateDir)
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-$description = "Remodex per-user bridge: $StateDir"
-$workerRecord = Join-Path $StateDir 'windows-worker.json'
+$description = "Remodex per-user ${WorkerKind}: $StateDir"
+$workerRecord = Join-Path $StateDir $(if ($WorkerKind -eq 'bridge') { 'windows-worker.json' } else { 'windows-voice-runtime-worker.json' })
 
 if ($Action -eq 'Run') {
     $env:REMODEX_DEVICE_STATE_DIR = $StateDir
-    $config = Get-Content -LiteralPath (Join-Path $StateDir 'daemon-config.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $configFile = if ($WorkerKind -eq 'bridge') { 'daemon-config.json' } else { 'voice-runtime-config.json' }
+    $config = Get-Content -LiteralPath (Join-Path $StateDir $configFile) -Raw -Encoding UTF8 | ConvertFrom-Json
     foreach ($file in @($config.nodePath, $config.cliPath, $config.codexPath)) {
         if (-not $file -or -not (Test-Path -LiteralPath $file -PathType Leaf)) {
             throw 'A recorded executable or checkout no longer exists. Run remodex start to reinstall the task.'
@@ -22,15 +24,16 @@ if ($Action -eq 'Run') {
     }
     $logs = Join-Path $StateDir 'logs'
     [IO.Directory]::CreateDirectory($logs) | Out-Null
-    $stdout = Join-Path $logs 'bridge.stdout.log'
-    $stderr = Join-Path $logs 'bridge.stderr.log'
+    $stdout = Join-Path $logs "${WorkerKind}.stdout.log"
+    $stderr = Join-Path $logs "${WorkerKind}.stderr.log"
     foreach ($log in @($stdout, $stderr)) {
         if (Test-Path -LiteralPath $log) { Move-Item -LiteralPath $log -Destination "$log.previous" -Force }
     }
     # Task Scheduler may terminate only the launcher. Record the exact child identity
     # so stop can also terminate its tree without ever trusting a recycled PID.
-    $child = Start-Process -FilePath $config.nodePath -NoNewWindow -PassThru `
-        -ArgumentList @(('"{0}"' -f $config.cliPath), 'run-service') `
+    $workerCommand = if ($WorkerKind -eq 'bridge') { 'run-service' } else { 'run-voice-runtime' }
+    $child = Start-Process -FilePath $config.nodePath -WindowStyle Hidden -PassThru `
+        -ArgumentList @(('"{0}"' -f $config.cliPath), $workerCommand) `
         -WorkingDirectory (Split-Path -Parent $config.cliPath) `
         -RedirectStandardOutput $stdout -RedirectStandardError $stderr
     @{ taskName = $TaskName; pid = $child.Id; startedAtTicks = $child.StartTime.ToUniversalTime().Ticks.ToString(); nodePath = $config.nodePath } |
@@ -95,13 +98,14 @@ switch ($Action) {
         }
         $directoryInfo.SetAccessControl($acl)
         # A GUI launcher prevents console windows before PowerShell can hide them.
-        $launcher = Join-Path $StateDir 'windows-task-launcher.exe'
-        $compiledLauncher = Join-Path $StateDir 'windows-task-launcher.new.exe'
+        $launcherName = if ($WorkerKind -eq 'bridge') { 'windows-task-launcher' } else { 'windows-voice-runtime-launcher' }
+        $launcher = Join-Path $StateDir "$launcherName.exe"
+        $compiledLauncher = Join-Path $StateDir "$launcherName.new.exe"
         if (Test-Path -LiteralPath $compiledLauncher) { Remove-Item -LiteralPath $compiledLauncher -Force }
         Add-Type -Path (Join-Path $PSScriptRoot 'windows-task-launcher.cs') -OutputAssembly $compiledLauncher -OutputType WindowsApplication
         Move-Item -LiteralPath $compiledLauncher -Destination $launcher -Force
         $quotedStateDir = $StateDir + ('\' * ($StateDir.Length - $StateDir.TrimEnd('\').Length))
-        $scriptArgs = '"{0}" "{1}" "{2}"' -f $PSCommandPath, $quotedStateDir, $TaskName
+        $scriptArgs = '"{0}" "{1}" "{2}" "{3}"' -f $PSCommandPath, $quotedStateDir, $TaskName, $WorkerKind
         $taskAction = New-ScheduledTaskAction -Execute $launcher -Argument $scriptArgs
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity.Name
         $principal = New-ScheduledTaskPrincipal -UserId $identity.Name -LogonType Interactive -RunLevel Limited

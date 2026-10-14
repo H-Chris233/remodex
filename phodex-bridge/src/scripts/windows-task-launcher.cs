@@ -13,7 +13,9 @@ internal static class WindowsTaskLauncher
 
     private static int Main(string[] args)
     {
-        if (args.Length != 3) return 1;
+        if (args.Length != 3 && args.Length != 4) return 1;
+        var workerKind = args.Length == 4 ? args[3] : "bridge";
+        if (workerKind != "bridge" && workerKind != "voice-runtime") return 1;
         try
         {
             Directory.CreateDirectory(Path.Combine(args[1], "logs"));
@@ -23,7 +25,7 @@ internal static class WindowsTaskLauncher
                     @"WindowsPowerShell\v1.0\powershell.exe"),
                 Arguments = "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "
                     + QuotePath(args[0]) + " -Action Run -StateDir " + QuotePath(args[1])
-                    + " -TaskName " + QuotePath(args[2]),
+                    + " -TaskName " + QuotePath(args[2]) + " -WorkerKind " + workerKind,
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardInput = true,
@@ -39,7 +41,7 @@ internal static class WindowsTaskLauncher
                 output.GetAwaiter().GetResult();
                 var errorText = errors.GetAwaiter().GetResult();
                 if (errorText.Length > 0)
-                    File.AppendAllText(Path.Combine(args[1], "logs", "bridge.stderr.log"), errorText);
+                    File.AppendAllText(Path.Combine(args[1], "logs", workerKind + ".stderr.log"), errorText);
                 return process.ExitCode;
             }
         }
@@ -49,7 +51,7 @@ internal static class WindowsTaskLauncher
             {
                 var logs = Path.Combine(args[1], "logs");
                 Directory.CreateDirectory(logs);
-                File.AppendAllText(Path.Combine(logs, "bridge.stderr.log"), error + Environment.NewLine);
+                File.AppendAllText(Path.Combine(logs, workerKind + ".stderr.log"), error + Environment.NewLine);
             }
             catch { /* The scheduler still receives the failure if logging is unavailable. */ }
             return 1;

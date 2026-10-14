@@ -39,14 +39,15 @@ const DEFAULT_PAIRING_WAIT_INTERVAL_MS = 200;
 const LAUNCH_AGENT_GUARD_SCRIPT = 'if [ ! -x "$1" ] || [ ! -f "$2" ]; then exit 0; fi; exec "$1" "$2" run-service';
 
 // Keeps the guard script constant: the installed paths are shell positionals, never interpolated source.
-function buildLaunchAgentProgramArguments({ nodePath, cliPath }) {
+function buildLaunchAgentProgramArguments({ nodePath, cliPath, label = SERVICE_LABEL, serviceCommand }) {
   return [
     "/bin/sh",
     "-c",
-    LAUNCH_AGENT_GUARD_SCRIPT,
-    SERVICE_LABEL,
+    serviceCommand ? LAUNCH_AGENT_GUARD_SCRIPT.replace("run-service", '"$3"') : LAUNCH_AGENT_GUARD_SCRIPT,
+    label,
     nodePath,
     cliPath,
+    ...(serviceCommand ? [serviceCommand] : []),
   ];
 }
 
@@ -404,16 +405,18 @@ function buildLaunchAgentPlist({
   stderrLogPath,
   nodePath,
   cliPath,
+  label = SERVICE_LABEL,
+  serviceCommand,
 }) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>${escapeXml(SERVICE_LABEL)}</string>
+  <string>${escapeXml(label)}</string>
   <key>ProgramArguments</key>
   <array>
-${buildLaunchAgentProgramArguments({ nodePath, cliPath })
+${buildLaunchAgentProgramArguments({ nodePath, cliPath, label, serviceCommand })
     .map((argument) => `    <string>${escapeXml(argument)}</string>`)
     .join("\n")}
   </array>

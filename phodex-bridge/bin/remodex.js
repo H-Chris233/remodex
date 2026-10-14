@@ -24,8 +24,10 @@ const {
 const { version } = require("../package.json");
 const { runWindowsServiceCommand } = require("../src/windows-service");
 const { readPendingPairingApproval, submitPairingDecision } = require("../src/pairing-approval");
+const { VOICE_COMMANDS, runVoiceCommand } = require("../src/voice-runtime-service");
 
 const defaultDeps = {
+  runVoiceCommand,
   submitPairingDecision,
   readPendingPairingApproval,
   runWindowsServiceCommand,
@@ -88,6 +90,11 @@ async function main({
 
   if (isVersionCommand(command)) {
     emitVersion({ jsonOutput, consoleImpl });
+    return;
+  }
+
+  if (VOICE_COMMANDS.has(command)) {
+    await (deps.runVoiceCommand || runVoiceCommand)(command, { jsonOutput, consoleImpl, threadId: watchThreadId });
     return;
   }
 
@@ -319,7 +326,8 @@ async function main({
   consoleImpl.error(
     "Usage: remodex up | remodex run | remodex start | remodex restart | remodex qr | remodex pair | remodex stop | remodex uninstall-service | remodex status | "
     + "remodex approve-pairing <requestId> --fingerprint <fullFingerprint> | remodex reject-pairing <requestId> | "
-    + "remodex reset-pairing | remodex resume | remodex watch [threadId] | remodex --version | "
+    + "remodex reset-pairing | remodex resume | remodex watch [threadId] | remodex setup-voice | remodex voice-runtime-status | "
+    + "remodex stop-voice-runtime | remodex rollback-voice | remodex open-desktop [threadId] | remodex --version | "
     + "append --json to start/restart/qr/pair/stop/uninstall-service/status/reset-pairing/resume for machine-readable output"
   );
   exitImpl(1);
