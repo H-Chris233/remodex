@@ -1763,11 +1763,16 @@ extension CodexService {
         text: String,
         fileMentions: [String] = [],
         itemId: String? = nil,
-        createdAt: Date? = nil
+        createdAt: Date? = nil,
+        isRealtimeDelegation: Bool = false,
+        attachments: [CodexImageAttachment] = []
     ) {
         let trimmedText = Self.normalizedMessageText(text)
-        guard Self.hasMeaningfulHistoryText(trimmedText) else {
+        guard Self.hasMeaningfulHistoryText(trimmedText) || !attachments.isEmpty || !fileMentions.isEmpty else {
             return
+        }
+        defer {
+            if isRealtimeDelegation { syncRealtimeTimeline(threadID: threadId, force: true) }
         }
 
         // `opencode run` can leave its server title at the generated timestamp.
@@ -1785,18 +1790,33 @@ extension CodexService {
         }
 
         let normalizedItemId = Self.normalizedHistoryIdentifier(itemId)
+        let realtimeSession = isRealtimeDelegation
+            ? (turnId.flatMap { turn in normalizedItemId.flatMap { realtimeSessionByDelegatedItem[threadId]?[[turn, $0]] } }) : nil
         if let existingIndex = messagesByThread[threadId]?.lastIndex(where: { candidate in
-            guard candidate.role == .user else {
+            guard candidate.role == .user, !candidate.id.hasPrefix("realtime:") else {
                 return false
             }
             if let normalizedItemId,
                Self.normalizedHistoryIdentifier(candidate.itemId) == normalizedItemId {
                 return true
             }
+            guard !isRealtimeDelegation, !candidate.isRealtimeDelegation else { return false }
             return Self.userMessageMatchesTextForHistory(candidate, text: trimmedText)
                 && Self.mirroredUserTurnIdentityAllowsMerge(candidate.turnId, turnId)
         }) {
             var didMutate = false
+            if isRealtimeDelegation, messagesByThread[threadId]?[existingIndex].isRealtimeDelegation != true {
+                messagesByThread[threadId]?[existingIndex].isRealtimeDelegation = true
+                didMutate = true
+            }
+            if let realtimeSession, messagesByThread[threadId]?[existingIndex].realtimeSessionId == nil {
+                messagesByThread[threadId]?[existingIndex].realtimeSessionId = realtimeSession
+                didMutate = true
+            }
+            if !attachments.isEmpty, messagesByThread[threadId]?[existingIndex].attachments.isEmpty == true {
+                messagesByThread[threadId]?[existingIndex].attachments = attachments
+                didMutate = true
+            }
             if messagesByThread[threadId]?[existingIndex].deliveryState != .confirmed {
                 messagesByThread[threadId]?[existingIndex].deliveryState = .confirmed
                 didMutate = true
@@ -1857,7 +1877,10 @@ extension CodexService {
                 createdAt: createdAt ?? Date(),
                 turnId: turnId,
                 itemId: normalizedItemId,
+                isRealtimeDelegation: isRealtimeDelegation,
+                realtimeSessionId: realtimeSession,
                 deliveryState: .confirmed,
+                attachments: attachments,
                 orderIndex: orderIndex
             )
         )
@@ -6002,7 +6025,7 @@ extension CodexService {
         let usesPaginatedHistory = supportsTurnPagination && initialTurnsLoadedByThreadID.contains(threadId)
         let projectionSourceMessages = snapshotProjectionSourceMessages(
             threadId: threadId,
-            from: messages,
+            from: CodexVoiceTranscript.projectDelegations(messages),
             usesPaginatedHistory: usesPaginatedHistory
         )
         let stoppedTurnIDs = rebuildStoppedTurnIDs(for: threadId, messages: projectionSourceMessages)

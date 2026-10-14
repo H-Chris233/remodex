@@ -34,8 +34,21 @@ test("voice consumes canonical item events and generation-scoped SDP", () => {
   assert.match(call, /String\(format: "%02x", \$0\)/);
   assert.ok(!call.includes("appendAudio") && !call.includes('method: "turn/start"'));
   assert.ok(!call.includes("print(") && !call.includes("UserDefaults"));
-  assert.match(service, /snapshotRevision != messageRevision/);
+  assert.match(service, /CodexVoiceTranscript\.historySnapshotStillCurrent/);
+  assert.match(service, /sendRequest\(method: "thread\/timeline\/list"[^\n]+\n\s*try Task\.checkCancellation\(\)/);
   assert.match(read("Services/CodexService+History.swift"), /Ordinary turn pages cannot confirm, deduplicate, or delete turn-less voice items/);
+});
+
+test("delegation provenance and shared-runtime human approval survive each decode entry", () => {
+  const incoming = read("Services/CodexService+Incoming.swift");
+  assert.match(incoming, /\[desktopIpcActionSource, "sharedRuntime"\]\.contains/);
+  assert.match(incoming, /selectedAccessMode == \.fullAccess && !requiresHumanApproval/);
+  for (const file of ["Services/CodexService+IncomingAssistant.swift", "Services/CodexService+History.swift"]) {
+    assert.ok(read(file).includes("remodexRealtimeDelegation"));
+  }
+  assert.ok(read("Services/CodexService+Messages.swift").includes("CodexVoiceTranscript.projectDelegations(messages)"));
+  assert.ok(read("Services/CodexService+RealtimeVoice.swift").includes("activeRealtimeSessionAtPageStart"));
+  assert.match(read("Models/CodexMessage.swift"), /decodeIfPresent\(Bool\.self, forKey: \.isRealtimeDelegation\) \?\? false/);
 });
 
 test("Swift call intent, canonical transcripts, and microphone ownership handle races", {
@@ -45,8 +58,20 @@ test("Swift call intent, canonical transcripts, and microphone ownership handle 
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "remodex-realtime-voice-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const binary = path.join(directory, "voice-check");
+  const expression = read("Services/CodexService+Incoming.swift").match(/let requiresHumanApproval = ([^\r\n]+)/)?.[1];
+  assert.ok(expression);
+  const guard = path.join(directory, "ApprovalGuard.swift");
+  fs.writeFileSync(guard, `import Foundation
+nonisolated enum RealtimeApprovalGuard {
+ static func requiresHumanDecision(source: String?) -> Bool {
+ let desktopIpcActionSource = "desktopIpc"
+ let paramsObject: [String: JSONValue]? = source.map { ["remodexActionSource": .string($0)] }
+ return ${expression}
+ }
+}
+`);
   execFileSync("xcrun", ["swiftc", "-default-isolation", "MainActor", "-module-cache-path", path.join(directory, "cache"), "-parse-as-library",
-    path.join(mobile, "Models/JSONValue.swift"), path.join(mobile, "Models/CodexRealtimeVoiceState.swift"),
+    ...["JSONValue.swift", "CodexMessage.swift", "CodexMessageOrderCounter.swift", "CodexCollaboration.swift", "CodexAsyncUserInput.swift", "CodexAutoApprovalReview.swift", "CodexImageAttachment.swift", "CodexTextContentFingerprint.swift", "CodexRealtimeVoiceState.swift"].map((file) => path.join(mobile, "Models", file)), guard,
     path.join(mobile, "Services/VoiceAudioSessionOwnership.swift"), path.join(__dirname, "fixtures/realtime-voice-harness.swift"), "-o", binary], { timeout: 45000 });
   assert.match(execFileSync(binary, { encoding: "utf8", timeout: 10000 }), /realtime voice checks passed/);
 });

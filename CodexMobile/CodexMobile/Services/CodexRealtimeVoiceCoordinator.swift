@@ -65,13 +65,22 @@ final class CodexRealtimeVoiceCoordinator: NSObject {
         }
     }
 
-    func probe(codex: CodexService, threadID: String) async {
+    @discardableResult
+    func probe(codex: CodexService, threadID: String) async -> Bool? {
         self.codex = codex
-        guard codex.isConnected, codex.thread(for: threadID)?.runtimeProvider != .opencode else { isSupported = false; return }
+        guard codex.isConnected, codex.isInitialized else { isSupported = false; return nil }
+        guard codex.thread(for: threadID)?.runtimeProvider != .opencode else { isSupported = false; return false }
         do {
             let result = try await codex.sendRequest(method: "remodex/realtime/status", params: .object(["threadId": .string(threadID)]), timeoutNanoseconds: 5_000_000_000).result?.objectValue
             isSupported = result?["supported"]?.boolValue == true && result?["protocolVersion"]?.intValue == 1
-        } catch { isSupported = false }
+            return isSupported
+        } catch CodexServiceError.rpcError(let error) where error.code == -32601 {
+            isSupported = false
+            return false
+        } catch {
+            isSupported = false
+            return nil
+        }
     }
 
     func start(codex: CodexService, thread: CodexThread) {
@@ -91,9 +100,15 @@ final class CodexRealtimeVoiceCoordinator: NSObject {
         startTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                await self.probe(codex: codex, threadID: thread.id)
+                guard codex.isConnected, codex.isInitialized else {
+                    throw CodexServiceError.invalidInput("Connect to your computer before starting a voice call.")
+                }
+                let supported = await self.probe(codex: codex, threadID: thread.id)
                 try self.checkIntent(generation)
-                guard self.isSupported else { throw CodexServiceError.invalidInput("Update the paired bridge and enable its shared Codex runtime to use voice calls.") }
+                guard let supported else {
+                    throw CodexServiceError.invalidInput("The connection to your computer was interrupted. Reconnect Remodex and try again.")
+                }
+                guard supported else { throw CodexServiceError.invalidInput("Finish Voice setup on your computer, then reconnect Remodex.") }
                 guard await AVAudioApplication.requestRecordPermission() else { throw CodexServiceError.invalidInput("Allow Microphone for Remodex in iPhone Settings to start a voice call.") }
                 try self.checkIntent(generation)
                 _ = self.armDeadline(message: "Voice connection timed out after 30 seconds. Try calling again.")

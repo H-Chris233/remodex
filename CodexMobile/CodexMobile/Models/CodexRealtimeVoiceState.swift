@@ -95,4 +95,32 @@ nonisolated struct CodexVoiceTranscript: Identifiable, Equatable, Sendable {
     }
 
     var messageID: String { "realtime:\(sessionID):\(id)" }
+
+    static func sessionID(fromMessageID id: String) -> String? {
+        guard id.hasPrefix("realtime:") else { return nil }
+        let parts = id.dropFirst("realtime:".count).split(separator: ":", maxSplits: 1)
+        return parts.count == 2 ? String(parts[0]) : nil
+    }
+
+    static func historySnapshotStillCurrent(_ transcript: CodexVoiceTranscript,
+        snapshot: [String: CodexVoiceTranscript], current: [String: CodexVoiceTranscript]) -> Bool {
+        snapshot[transcript.messageID] == current[transcript.messageID]
+    }
+
+    static func projectDelegations(_ messages: [CodexMessage]) -> [CodexMessage] {
+        let canonicalSessions = Set(messages.compactMap { message -> String? in
+            guard message.role == .user, !message.isRealtimeDelegation,
+                  message.id.hasPrefix("realtime:"), !message.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return message.realtimeSessionId
+        })
+        return messages.compactMap { message in
+            guard message.role == .user, message.isRealtimeDelegation,
+                  let session = message.realtimeSessionId, canonicalSessions.contains(session) else { return message }
+            guard !message.attachments.isEmpty || !message.fileMentions.isEmpty
+                    || !message.skillMentions.isEmpty || !message.pluginMentions.isEmpty else { return nil }
+            var attachmentRow = message
+            attachmentRow.text = ""
+            return attachmentRow
+        }
+    }
 }

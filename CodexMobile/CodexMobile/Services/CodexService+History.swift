@@ -128,6 +128,7 @@ extension CodexService {
                 let decodedText = decodeItemText(from: itemObject)
                 let skillMentions = decodeHistorySkillMentions(from: itemObject)
                 let pluginMentions = decodeHistoryPluginMentions(from: itemObject)
+                let fileMentions = itemObject["fileMentions"]?.arrayValue?.compactMap(\.stringValue) ?? []
                 let imageAttachments = decodeImageAttachments(from: itemObject)
 
                 switch normalizedItemType(itemType) {
@@ -136,12 +137,15 @@ extension CodexService {
                         to: &result,
                         role: .user,
                         text: decodedText,
+                        isRealtimeDelegation: itemObject["remodexRealtimeDelegation"]?.boolValue == true,
+                        realtimeSessionId: turnID.flatMap { turn in itemID.flatMap { realtimeSessionByDelegatedItem[threadId]?[[turn, $0]] } },
                         threadId: threadId,
                         turnId: turnID,
                         itemId: itemID,
                         sourceItemKey: sourceItemKey,
                         createdAt: timestamp,
                         timeZoneIdentifier: timeZoneIdentifier,
+                        fileMentions: fileMentions,
                         skillMentions: skillMentions,
                         pluginMentions: pluginMentions,
                         attachments: imageAttachments
@@ -178,12 +182,15 @@ extension CodexService {
                             ? normalizedAssistantPhase(itemObject["phase"]?.stringValue)
                             : nil,
                         text: decodedText,
+                        isRealtimeDelegation: mappedRole == .user && itemObject["remodexRealtimeDelegation"]?.boolValue == true,
+                        realtimeSessionId: turnID.flatMap { turn in itemID.flatMap { realtimeSessionByDelegatedItem[threadId]?[[turn, $0]] } },
                         threadId: threadId,
                         turnId: turnID,
                         itemId: itemID,
                         sourceItemKey: sourceItemKey,
                         createdAt: timestamp,
                         timeZoneIdentifier: timeZoneIdentifier,
+                        fileMentions: mappedRole == .user ? fileMentions : [],
                         skillMentions: mappedRole == .user ? skillMentions : [],
                         pluginMentions: mappedRole == .user ? pluginMentions : [],
                         attachments: imageAttachments
@@ -2023,6 +2030,8 @@ extension CodexService {
         runningThreadIDs: Set<String>
     ) -> CodexMessage {
         var value = localMessage
+        value.isRealtimeDelegation = value.isRealtimeDelegation || serverMessage.isRealtimeDelegation
+        value.realtimeSessionId = serverMessage.realtimeSessionId ?? value.realtimeSessionId
         let threadIsActive = activeThreadIDs.contains(localMessage.threadId) || runningThreadIDs.contains(localMessage.threadId)
         let normalizedLocalTurnID = normalizedHistoryIdentifier(localMessage.turnId)
         let normalizedServerTurnID = normalizedHistoryIdentifier(serverMessage.turnId)
@@ -2247,7 +2256,9 @@ extension CodexService {
     }
 
     nonisolated static func userMessagesMatchForHistory(_ lhs: CodexMessage, _ rhs: CodexMessage) -> Bool {
-        userMessageMatchesTextForHistory(
+        guard !lhs.isRealtimeDelegation, !rhs.isRealtimeDelegation,
+              !lhs.id.hasPrefix("realtime:"), !rhs.id.hasPrefix("realtime:") else { return false }
+        return userMessageMatchesTextForHistory(
             lhs,
             text: rhs.text,
             skillMentions: rhs.skillMentions,
@@ -3201,12 +3212,15 @@ extension CodexService {
         kind: CodexMessageKind = .chat,
         assistantPhase: String? = nil,
         text: String,
+        isRealtimeDelegation: Bool = false,
+        realtimeSessionId: String? = nil,
         threadId: String,
         turnId: String?,
         itemId: String?,
         sourceItemKey: String? = nil,
         createdAt: Date,
         timeZoneIdentifier: String? = nil,
+        fileMentions: [String] = [],
         skillMentions: [String] = [],
         pluginMentions: [String] = [],
         attachments: [CodexImageAttachment] = [],
@@ -3218,6 +3232,9 @@ extension CodexService {
     ) {
         guard !text.isEmpty
             || !attachments.isEmpty
+            || !fileMentions.isEmpty
+            || !skillMentions.isEmpty
+            || !pluginMentions.isEmpty
             || planState != nil
             || subagentAction != nil
             || asyncUserInput != nil
@@ -3235,6 +3252,7 @@ extension CodexService {
                 kind: kind,
                 assistantPhase: role == .assistant ? normalizedAssistantPhase(assistantPhase) : nil,
                 text: text,
+                fileMentions: fileMentions,
                 skillMentions: skillMentions,
                 pluginMentions: pluginMentions,
                 createdAt: createdAt,
@@ -3242,6 +3260,8 @@ extension CodexService {
                 turnId: turnId,
                 itemId: itemId,
                 sourceItemKey: sourceItemKey,
+                isRealtimeDelegation: isRealtimeDelegation,
+                realtimeSessionId: realtimeSessionId,
                 isStreaming: false,
                 deliveryState: .confirmed,
                 attachments: attachments,

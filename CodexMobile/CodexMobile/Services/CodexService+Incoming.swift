@@ -139,8 +139,8 @@ extension CodexService {
                 params: params
             )
 
-            let isDesktopMirroredApproval = paramsObject?["remodexActionSource"]?.stringValue == desktopIpcActionSource
-            if selectedAccessMode == .fullAccess && !isDesktopMirroredApproval {
+            let requiresHumanApproval = [desktopIpcActionSource, "sharedRuntime"].contains(paramsObject?["remodexActionSource"]?.stringValue ?? "")
+            if selectedAccessMode == .fullAccess && !requiresHumanApproval {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     do {

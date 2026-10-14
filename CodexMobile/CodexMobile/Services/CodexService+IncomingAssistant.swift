@@ -82,8 +82,10 @@ extension CodexService {
         let text = firstNonEmptyString([
             paramsObject["message"]?.stringValue,
             paramsObject["text"]?.stringValue,
-        ])
-        guard let text else { return }
+        ]) ?? ""
+        let attachments = decodeImageAttachments(from: paramsObject)
+        let fileMentions = paramsObject["fileMentions"]?.arrayValue?.compactMap(\.stringValue) ?? []
+        guard !text.isEmpty || !attachments.isEmpty || !fileMentions.isEmpty else { return }
         let createdAt = decodeHistoryTimestamp(from: paramsObject)
         let itemId = firstNonEmptyString([
             paramsObject["itemId"]?.stringValue,
@@ -95,8 +97,11 @@ extension CodexService {
             threadId: threadId,
             turnId: turnId,
             text: text,
+            fileMentions: fileMentions,
             itemId: itemId,
-            createdAt: createdAt
+            createdAt: createdAt,
+            isRealtimeDelegation: paramsObject["remodexRealtimeDelegation"]?.boolValue == true,
+            attachments: attachments
         )
     }
 
@@ -409,7 +414,7 @@ private extension CodexService {
         paramsObject: IncomingParamsObject,
         itemType: String
     ) -> Bool {
-        guard isDesktopMirroredBridgeEvent(paramsObject) else {
+        guard isDesktopMirroredBridgeEvent(paramsObject) || itemObject["remodexRealtimeDelegation"]?.boolValue == true else {
             return false
         }
 
@@ -429,17 +434,20 @@ private extension CodexService {
         }
 
         let text = extractIncomingMessageText(from: itemObject)
-        guard !text.isEmpty else {
-            return true
-        }
+        let attachments = decodeImageAttachments(from: itemObject)
+        let fileMentions = itemObject["fileMentions"]?.arrayValue?.compactMap(\.stringValue) ?? []
+        guard !text.isEmpty || !attachments.isEmpty || !fileMentions.isEmpty else { return true }
 
         markMirroredRunningCatchupNeeded(for: threadId)
         appendConfirmedMirroredUserMessage(
             threadId: threadId,
             turnId: turnId,
             text: text,
+            fileMentions: fileMentions,
             itemId: itemObject["id"]?.stringValue,
-            createdAt: decodeHistoryTimestamp(from: paramsObject)
+            createdAt: decodeHistoryTimestamp(from: paramsObject),
+            isRealtimeDelegation: itemObject["remodexRealtimeDelegation"]?.boolValue == true,
+            attachments: attachments
         )
         if thread(for: threadId)?.runtimeProvider != .opencode,
            messagesByThread[threadId]?.contains(where: { $0.asyncUserInput != nil }) == true,

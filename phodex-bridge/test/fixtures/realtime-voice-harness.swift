@@ -51,6 +51,60 @@ struct RealtimeVoiceChecks {
         raw = item; raw["realtimeSessionId"] = nil
         assert(CodexVoiceTranscript(item: raw) == nil)
 
+        let canonical = CodexMessage(id: "realtime:session-a:user-1", threadId: "thread", role: .user, text: "Do it", realtimeSessionId: "session-a")
+        let delegation = CodexMessage(threadId: "thread", role: .user, text: "Do it", itemId: "delegation-1", isRealtimeDelegation: true, realtimeSessionId: "session-a")
+        assert(CodexVoiceTranscript.projectDelegations([delegation]).count == 1)
+        assert(CodexVoiceTranscript.projectDelegations([delegation, canonical]).map(\.id) == [canonical.id])
+        assert(CodexVoiceTranscript.projectDelegations([canonical, delegation]).map(\.id) == [canonical.id])
+        var unknownSession = delegation
+        unknownSession.realtimeSessionId = nil
+        assert(CodexVoiceTranscript.projectDelegations([unknownSession, canonical]).count == 2)
+        unknownSession.realtimeSessionId = "session-a"
+        assert(CodexVoiceTranscript.projectDelegations([unknownSession, canonical]).count == 1)
+        var otherCall = delegation
+        otherCall.realtimeSessionId = "session-b"
+        assert(CodexVoiceTranscript.projectDelegations([otherCall, canonical]).count == 2)
+        let keyboard = CodexMessage(threadId: "thread", role: .user, text: "Do it", realtimeSessionId: "session-a")
+        assert(CodexVoiceTranscript.projectDelegations([keyboard, canonical]).count == 2)
+        var emptyCanonical = canonical
+        emptyCanonical.text = ""
+        assert(CodexVoiceTranscript.projectDelegations([delegation, emptyCanonical]).count == 2)
+        var imageDelegation = delegation
+        imageDelegation.attachments = [CodexImageAttachment(thumbnailBase64JPEG: "fixture-image", sourceURL: "/tmp/image.jpg")]
+        imageDelegation.fileMentions = ["notes.txt"]
+        let retained = CodexVoiceTranscript.projectDelegations([imageDelegation, canonical])
+        assert(retained.count == 2 && retained[0].text.isEmpty)
+        assert(retained[0].attachments == imageDelegation.attachments && retained[0].fileMentions == ["notes.txt"])
+        assert(imageDelegation.text == "Do it")
+        let encoded = try JSONEncoder().encode(imageDelegation)
+        let decoded = try JSONDecoder().decode(CodexMessage.self, from: encoded)
+        assert(decoded == imageDelegation)
+        let legacy = Data(#"{"id":"legacy-keyboard","threadId":"thread","role":"user","text":"Do it","createdAt":0}"#.utf8)
+        let legacyMessage = try JSONDecoder().decode(CodexMessage.self, from: legacy)
+        assert(!legacyMessage.isRealtimeDelegation && legacyMessage.realtimeSessionId == nil)
+        assert(CodexVoiceTranscript.projectDelegations([legacyMessage, canonical]).count == 2)
+        let oldVoiceCache = Data(#"{"id":"realtime:session-a:legacy-item","threadId":"thread","role":"user","text":"Do it","createdAt":0}"#.utf8)
+        let oldVoice = try JSONDecoder().decode(CodexMessage.self, from: oldVoiceCache)
+        assert(oldVoice.realtimeSessionId == "session-a")
+
+        var partial = transcript
+        partial.text = "Hello"
+        var completed = transcript
+        completed.text = "Hello world"
+        let captured = [partial.messageID: partial]
+        assert(CodexVoiceTranscript.historySnapshotStillCurrent(completed, snapshot: captured, current: captured))
+        var current = captured
+        current[CodexVoiceTranscript(item: otherSession)!.messageID] = CodexVoiceTranscript(item: otherSession)!
+        assert(CodexVoiceTranscript.historySnapshotStillCurrent(completed, snapshot: captured, current: current))
+        current[partial.messageID] = completed
+        assert(!CodexVoiceTranscript.historySnapshotStillCurrent(partial, snapshot: captured, current: current))
+        assert(CodexVoiceTranscript.historySnapshotStillCurrent(CodexVoiceTranscript(item: otherSession)!, snapshot: [:], current: [:]))
+
+        assert(RealtimeApprovalGuard.requiresHumanDecision(source: "desktopIpc"))
+        assert(RealtimeApprovalGuard.requiresHumanDecision(source: "sharedRuntime"))
+        assert(!RealtimeApprovalGuard.requiresHumanDecision(source: nil))
+        assert(!RealtimeApprovalGuard.requiresHumanDecision(source: "phone"))
+
         let oldOwner = UUID(), newOwner = UUID()
         try await VoiceAudioSessionOwnership.acquire(oldOwner) {}
         do {

@@ -434,6 +434,7 @@ final class CodexService {
         }
     }
     var realtimeVoice = CodexRealtimeVoiceCoordinator()
+    @ObservationIgnored var realtimeSessionByDelegatedItem: [String: [[String]: String]] = [:]
     @ObservationIgnored var realtimeTranscriptByThread: [String: [String: CodexVoiceTranscript]] = [:]
     @ObservationIgnored var realtimeTimelineTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored var realtimeTimelineSyncedAt: [String: Date] = [:]

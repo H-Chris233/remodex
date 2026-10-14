@@ -4,6 +4,14 @@ extension CodexService {
     func handleRealtimeVoiceNotification(method: String, params: [String: JSONValue]) {
         realtimeVoice.handleNotification(method: method, params: params)
         guard let threadID = params["threadId"]?.stringValue else { return }
+        if let item = params["item"]?.objectValue,
+           let session = item["realtimeSessionId"]?.stringValue,
+           method == "thread/realtime/item/started" || method == "thread/realtime/item/completed" {
+            if item["type"]?.stringValue == "bemItemPromoted",
+               let turn = item["turn_id"]?.stringValue, let itemID = item["item_id"]?.stringValue {
+                associateRealtimeDelegation(threadID: threadID, turnID: turn, sessionID: session, itemID: itemID)
+            }
+        }
         switch method {
         case "thread/realtime/item/started", "thread/realtime/item/completed":
             if let item = params["item"]?.objectValue, let transcript = CodexVoiceTranscript(item: item) {
@@ -22,11 +30,7 @@ extension CodexService {
         }
     }
 
-    func upsertRealtimeTranscript(_ transcript: CodexVoiceTranscript, threadID: String, snapshotRevision: Int? = nil) {
-        if let snapshotRevision, snapshotRevision != messageRevision(for: threadID),
-           realtimeTranscriptByThread[threadID]?[transcript.messageID] != nil {
-            return
-        }
+    func upsertRealtimeTranscript(_ transcript: CodexVoiceTranscript, threadID: String) {
         realtimeTranscriptByThread[threadID, default: [:]][transcript.messageID] = transcript
         var messages = messagesByThread[threadID] ?? []
         if let index = messages.firstIndex(where: { $0.id == transcript.messageID }) {
@@ -37,12 +41,38 @@ extension CodexService {
             messages.append(CodexMessage(id: transcript.messageID, threadId: threadID,
                 role: transcript.role == "user" ? .user : .assistant,
                 assistantPhase: transcript.role == "assistant" ? "voice" : nil,
-                text: transcript.text, itemId: transcript.id, sourceItemKey: transcript.messageID))
+                text: transcript.text, itemId: transcript.id, sourceItemKey: transcript.messageID, realtimeSessionId: transcript.sessionID))
         }
         messagesByThread[threadID] = messages
         persistMessages()
         updateCurrentOutput(for: threadID)
         realtimeVoice.receiveTranscript(transcript)
+        if messages.contains(where: { $0.isRealtimeDelegation && $0.realtimeSessionId == nil }) {
+            syncRealtimeTimeline(threadID: threadID, force: true)
+        }
+    }
+
+    // A BEM promotion or canonical rollout position links a delegation by turn/item identity, never by text.
+    func associateRealtimeDelegation(threadID: String, turnID: String, sessionID: String?, itemID: String, isMarkedItem: Bool = false) {
+        let key = [turnID, itemID]
+        if let sessionID { realtimeSessionByDelegatedItem[threadID, default: [:]][key] = sessionID }
+        guard var messages = messagesByThread[threadID] else { return }
+        var changed = false
+        for index in messages.indices where messages[index].role == .user && messages[index].turnId == turnID && messages[index].itemId == itemID {
+            if isMarkedItem, !messages[index].isRealtimeDelegation {
+                messages[index].isRealtimeDelegation = true
+                changed = true
+            }
+            if messages[index].isRealtimeDelegation, let sessionID, messages[index].realtimeSessionId != sessionID {
+                messages[index].realtimeSessionId = sessionID
+                changed = true
+            }
+        }
+        if changed {
+            messagesByThread[threadID] = messages
+            persistMessages()
+            updateCurrentOutput(for: threadID)
+        }
     }
 
     // This endpoint supplies turn-less canonical voice items; thread/turns/list cannot restore them.
@@ -53,7 +83,9 @@ extension CodexService {
               force || Date().timeIntervalSince(realtimeTimelineSyncedAt[threadID] ?? .distantPast) > 30 else { return }
         realtimeTimelineTasks[threadID] = Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.realtimeTimelineTasks[threadID] = nil }
+            defer {
+                if !Task.isCancelled { self.realtimeTimelineTasks[threadID] = nil }
+            }
             var cursor: String?
             var seenCursors: Set<String> = []
             var positions: [String: Int] = [:]
@@ -63,18 +95,40 @@ extension CodexService {
                     guard self.isConnected, self.activeThreadId == threadID || self.realtimeVoice.threadID == threadID else { return }
                     var params: [String: JSONValue] = ["threadId": .string(threadID), "limit": .integer(100)]
                     if let cursor { params["cursor"] = .string(cursor) }
-                    let snapshotRevision = self.messageRevision(for: threadID)
+                    let transcriptSnapshot = self.realtimeTranscriptByThread[threadID] ?? [:]
                     let response = try await self.sendRequest(method: "thread/timeline/list", params: .object(params), timeoutNanoseconds: 8_000_000_000)
+                    try Task.checkCancellation()
                     guard let result = response.result?.objectValue, let entries = result["data"]?.arrayValue else { return }
-                    let snapshotIsCurrent = self.messageRevision(for: threadID) == snapshotRevision
+                    let liveTranscriptsAtResponse = self.realtimeTranscriptByThread[threadID] ?? [:]
+                    var activeSession = result["activeRealtimeSessionAtPageStart"]?.stringValue
                     for value in entries {
                         guard let entry = value.objectValue, let item = entry["item"]?.objectValue,
                               let position = entry["position"]?.intValue else { continue }
-                        if entry["type"]?.stringValue == "realtime", let transcript = CodexVoiceTranscript(item: item) {
-                            self.upsertRealtimeTranscript(transcript, threadID: threadID, snapshotRevision: snapshotIsCurrent ? nil : snapshotRevision)
-                            positions[transcript.messageID] = position
+                        if entry["type"]?.stringValue == "realtime" {
+                            switch item["type"]?.stringValue {
+                            case "realtimeSessionStarted": activeSession = item["realtimeSessionId"]?.stringValue
+                            case "realtimeSessionClosed":
+                                if activeSession == item["realtimeSessionId"]?.stringValue { activeSession = nil }
+                            case "bemItemPromoted":
+                                if let turn = item["turn_id"]?.stringValue, let session = item["realtimeSessionId"]?.stringValue,
+                                   let itemID = item["item_id"]?.stringValue {
+                                    self.associateRealtimeDelegation(threadID: threadID, turnID: turn, sessionID: session, itemID: itemID)
+                                }
+                            default: break
+                            }
+                            if let transcript = CodexVoiceTranscript(item: item) {
+                                if CodexVoiceTranscript.historySnapshotStillCurrent(transcript, snapshot: transcriptSnapshot,
+                                    current: liveTranscriptsAtResponse) {
+                                    self.upsertRealtimeTranscript(transcript, threadID: threadID)
+                                }
+                                positions[transcript.messageID] = position
+                            }
                         } else if entry["type"]?.stringValue == "item", let itemID = item["id"]?.stringValue {
                             let turnID = entry["turnId"]?.stringValue
+                            if item["remodexRealtimeDelegation"]?.boolValue == true, let turnID {
+                                let session = activeSession ?? self.realtimeSessionByDelegatedItem[threadID]?[[turnID, itemID]]
+                                self.associateRealtimeDelegation(threadID: threadID, turnID: turnID, sessionID: session, itemID: itemID, isMarkedItem: true)
+                            }
                             for message in self.messages(for: threadID) where message.itemId == itemID && message.turnId == turnID {
                                 positions[message.id] = position
                             }

@@ -78,6 +78,8 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
     // Bridge-provided, turn-scoped semantic alias. Unlike itemId it survives a
     // rollout/JSONL event being re-emitted later with Codex's provider id.
     var sourceItemKey: String?
+    var isRealtimeDelegation: Bool
+    var realtimeSessionId: String?
     var isStreaming: Bool
     var deliveryState: CodexMessageDeliveryState
     var attachments: [CodexImageAttachment]
@@ -108,6 +110,8 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         turnId: String? = nil,
         itemId: String? = nil,
         sourceItemKey: String? = nil,
+        isRealtimeDelegation: Bool = false,
+        realtimeSessionId: String? = nil,
         isStreaming: Bool = false,
         deliveryState: CodexMessageDeliveryState = .confirmed,
         attachments: [CodexImageAttachment] = [],
@@ -135,6 +139,8 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         self.turnId = turnId
         self.itemId = itemId
         self.sourceItemKey = sourceItemKey
+        self.isRealtimeDelegation = isRealtimeDelegation
+        self.realtimeSessionId = realtimeSessionId ?? CodexVoiceTranscript.sessionID(fromMessageID: id)
         self.isStreaming = isStreaming
         self.deliveryState = deliveryState
         self.attachments = attachments
@@ -177,6 +183,8 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         case turnId
         case itemId
         case sourceItemKey
+        case isRealtimeDelegation
+        case realtimeSessionId
         case isStreaming
         case deliveryState
         case attachments
@@ -209,6 +217,9 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         turnId = try container.decodeIfPresent(String.self, forKey: .turnId)
         itemId = try container.decodeIfPresent(String.self, forKey: .itemId)
         sourceItemKey = try container.decodeIfPresent(String.self, forKey: .sourceItemKey)
+        isRealtimeDelegation = try container.decodeIfPresent(Bool.self, forKey: .isRealtimeDelegation) ?? false
+        realtimeSessionId = try container.decodeIfPresent(String.self, forKey: .realtimeSessionId)
+            ?? CodexVoiceTranscript.sessionID(fromMessageID: id)
         isStreaming = try container.decodeIfPresent(Bool.self, forKey: .isStreaming) ?? false
         deliveryState = try container.decodeIfPresent(CodexMessageDeliveryState.self, forKey: .deliveryState) ?? .confirmed
         attachments = try container.decodeIfPresent([CodexImageAttachment].self, forKey: .attachments) ?? []
@@ -260,6 +271,8 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         try container.encodeIfPresent(turnId, forKey: .turnId)
         try container.encodeIfPresent(itemId, forKey: .itemId)
         try container.encodeIfPresent(sourceItemKey, forKey: .sourceItemKey)
+        try container.encode(isRealtimeDelegation, forKey: .isRealtimeDelegation)
+        try container.encodeIfPresent(realtimeSessionId, forKey: .realtimeSessionId)
         try container.encode(isStreaming, forKey: .isStreaming)
         try container.encode(deliveryState, forKey: .deliveryState)
         try container.encode(attachments, forKey: .attachments)
@@ -313,6 +326,8 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
             && lhs.turnId == rhs.turnId
             && lhs.itemId == rhs.itemId
             && lhs.sourceItemKey == rhs.sourceItemKey
+            && lhs.isRealtimeDelegation == rhs.isRealtimeDelegation
+            && lhs.realtimeSessionId == rhs.realtimeSessionId
             && lhs.isStreaming == rhs.isStreaming
             && lhs.deliveryState == rhs.deliveryState
             && lhs.attachments == rhs.attachments
@@ -341,6 +356,8 @@ struct CodexMessage: Identifiable, Codable, Hashable, Sendable {
         hasher.combine(turnId)
         hasher.combine(itemId)
         hasher.combine(sourceItemKey)
+        hasher.combine(isRealtimeDelegation)
+        hasher.combine(realtimeSessionId)
         hasher.combine(isStreaming)
         hasher.combine(deliveryState)
         hasher.combine(attachments)
